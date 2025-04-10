@@ -23,9 +23,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/acse-ci223/bambulabs_api"
-Docs = "https://acse-ci223.github.io/bambulabs_api/"
-Issues = "https://github.com/acse-ci223/bambulabs_api/issues"
+Homepage = "https://github.com/BambuTools/bambulabs_api"
+Docs = "https://bambutools.github.io/bambulabs_api/"
+Issues = "https://github.com/BambuTools/bambulabs_api/issues"
 
 [tool.poetry.dependencies]
 python = "^3.10"
