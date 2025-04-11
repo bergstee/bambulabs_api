@@ -16,7 +16,7 @@ If you've found this package useful, help us support more printers with the link
 
 ## Documentation
 
-Comprehensive documentation for this package, including API reference and usage guides, can be found [here](https://mchrisgm.github.io/bambulabs_api/).
+Comprehensive documentation for this package, including API reference and usage guides, can be found [here](https://bambutools.github.io/bambulabs_api/).
 
 ## Installation
 
