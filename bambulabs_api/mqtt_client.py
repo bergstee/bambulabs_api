@@ -18,7 +18,7 @@ from bambulabs_api.printer_info import (
     PrinterFirmwareInfo,
     PrinterType)
 
-from .filament_info import Filament, FilamentTray
+from .filament_info import AMSFilamentSettings, FilamentTray
 from .states_info import GcodeState, PrintStatus
 
 
@@ -878,7 +878,7 @@ class PrinterMQTTClient:
 
     def set_printer_filament(
         self,
-        filament_material: Filament,
+        filament_material: AMSFilamentSettings,
         colour: str,
         ams_id: int = 255,
         tray_id: int = 254,

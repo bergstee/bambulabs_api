@@ -464,11 +464,8 @@ class Printer:
             True if the filament is set successfully.
         """
         assert len(color) == 6, "Color must be a 6 character hex code"
-        if isinstance(filament, str) or isinstance(filament, AMSFilamentSettings):  # type: ignore # noqa: E501
+        if isinstance(filament, str):
             filament = Filament(filament)
-        else:
-            raise ValueError(
-                "Filament must be a string or AMSFilamentSettings object")
         return self.mqtt_client.set_printer_filament(
             filament,
             color,
