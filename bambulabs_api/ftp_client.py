@@ -89,8 +89,24 @@ class PrinterFTPClient:
                                  callback=lambda x: logging.debug(f"Uploaded {x} bytes"))   # noqa  # pylint: disable=logging-fstring-interpolation
 
     @connect_and_run
-    def list_directory(self):
-        return self.ftps.retrlines('LIST')
+    def list_directory(self, path: str | None = None):
+        lines = []
+        res = self.ftps.retrlines(
+            f'LIST {path if path is not None else ""}',
+            lines.append)
+        return res, lines
+
+    def list_images_dir(self):
+        return self.list_directory("image")
+
+    def list_cache_dir(self):
+        return self.list_directory("cache")
+
+    def list_timelapse_dir(self):
+        return self.list_directory("timelapse")
+
+    def list_logger_dir(self):
+        return self.list_directory("logger")
 
     @connect_and_run
     def download_file(self, file_path: str):
