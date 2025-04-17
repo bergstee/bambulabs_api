@@ -1,4 +1,5 @@
 import ftplib
+from io import BytesIO
 import ssl
 
 import logging
@@ -86,6 +87,32 @@ class PrinterFTPClient:
     def upload_file(self, file: BinaryIO, file_path: str) -> str:
         return self.ftps.storbinary(f'STOR {file_path}', file, blocksize=32768,
                                  callback=lambda x: logging.debug(f"Uploaded {x} bytes"))   # noqa  # pylint: disable=logging-fstring-interpolation
+
+    @connect_and_run
+    def list_directory(self, path: str | None = None):
+        lines = []
+        res = self.ftps.retrlines(
+            f'LIST {path if path is not None else ""}',
+            lines.append)
+        return res, lines
+
+    def list_images_dir(self):
+        return self.list_directory("image")
+
+    def list_cache_dir(self):
+        return self.list_directory("cache")
+
+    def list_timelapse_dir(self):
+        return self.list_directory("timelapse")
+
+    def list_logger_dir(self):
+        return self.list_directory("logger")
+
+    @connect_and_run
+    def download_file(self, file_path: str):
+        b = BytesIO()
+        self.ftps.retrbinary(f'RETR {file_path}', b.write)
+        return b
 
     @connect_and_run
     def delete_file(self, file_path: str) -> str:
