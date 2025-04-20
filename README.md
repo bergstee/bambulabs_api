@@ -78,6 +78,12 @@ if __name__ == '__main__':
     printer.disconnect()
 ```
 
+## Known Limitations
+
+* X1 Printers are not fully supported yet - camera integration is not yet implemented (for api versions < 2.7.0 please see the [No Camera Example](/examples/Basic/basic_no_camera.py)).
+* H2D printers have not been tested yet.
+
+
 ## Development
 
 If you want to contribute to the development of this API or run it in a development environment, follow these steps:
