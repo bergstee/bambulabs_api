@@ -10,9 +10,9 @@ If you've found this package useful, help us support more printers with the link
 
 ## Status
 
-[![flake8](https://github.com/mchrisgm/bambulabs_api/actions/workflows/flake8.yml/badge.svg)](https://github.com/mchrisgm/bambulabs_api/actions/workflows/flake8.yml)
-[![pytest-unit-tests](https://github.com/mchrisgm/bambulabs_api/actions/workflows/pytest-unit-tests.yml/badge.svg)](https://github.com/mchrisgm/bambulabs_api/actions/workflows/pytest-unit-tests.yml)
-[![GitHub Pages](https://github.com/mchrisgm/bambulabs_api/actions/workflows/static.yml/badge.svg)](https://github.com/mchrisgm/bambulabs_api/actions/workflows/static.yml)
+[![flake8](https://github.com/BambuTools/bambulabs_api/actions/workflows/flake8.yml/badge.svg)](https://github.com/BambuTools/bambulabs_api/actions/workflows/flake8.yml)
+[![pytest-unit-tests](https://github.com/BambuTools/bambulabs_api/actions/workflows/pytest-unit-tests.yml/badge.svg)](https://github.com/BambuTools/bambulabs_api/actions/workflows/pytest-unit-tests.yml)
+[![GitHub Pages](https://github.com/BambuTools/bambulabs_api/actions/workflows/static.yml/badge.svg)](https://github.com/BambuTools/bambulabs_api/actions/workflows/static.yml)
 
 ## Documentation
 
@@ -92,7 +92,7 @@ If you want to contribute to the development of this API or run it in a developm
 1. Clone the repository:
 
    ```bash
-   git clone https://github.com/mchrisgm/bambulabs_api.git
+   git clone https://github.com/BambuTools/bambulabs_api.git
    ```
 
 2. Change directory:
@@ -145,7 +145,7 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## Support
 
-If you encounter any issues or have questions, feel free to open an issue on the [GitHub repository](https://github.com/mchrisgm/bambulabs_api/issues).
+If you encounter any issues or have questions, feel free to open an issue on the [GitHub repository](https://github.com/BambuTools/bambulabs_api/issues).
 
 ## Acknowledgements
 
