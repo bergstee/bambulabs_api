@@ -6,3 +6,9 @@ sphinx_rtd_theme
 paho_mqtt
 webcolors
 pillow
+
+psycopg2-binary
+
+python-dotenv
+
+rich
