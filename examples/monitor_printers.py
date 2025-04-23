@@ -208,6 +208,60 @@ if __name__ == '__main__':
                         if log_cur: log_cur.close()
             # --- End Function to Log Status Periodically ---
 
+            # --- Function to Record Stock for Completed Print ---
+            def record_stock_for_completed_print(conn, p_id, filename, completion_time):
+                stock_cur = None
+                try:
+                    stock_cur = conn.cursor()
+                    # console.print(f"    Querying item IDs for filename: {filename}") # Optional debug
+
+                    # Query to get item_id(s) associated with the printed file
+                    # Join printer_files on filename -> printer_file_models on printer_file_id
+                    query_sql = """
+                        SELECT pfm.item_id
+                        FROM printer_file_models pfm
+                        JOIN printer_files pf ON pfm.printer_file_id = pf.id -- Corrected JOIN condition
+                        WHERE pf.filename = %s;
+                    """
+                    stock_cur.execute(query_sql, (filename,))
+                    item_ids = stock_cur.fetchall()
+
+                    if not item_ids:
+                        console.print(f"    [yellow]Warning:[/yellow] No associated item IDs found in printer_file_models for filename: {filename}. Cannot record stock.")
+                        return # No items to record
+
+                    # console.print(f"    Found {len(item_ids)} item ID(s) to record stock for.") # Optional debug
+
+                    insert_sql = """
+                        INSERT INTO stock_transactions
+                            (item_id, quantity, transaction_type, transaction_date, notes)
+                        VALUES
+                            (%s, %s, %s, %s, %s);
+                    """
+                    transaction_type = 'PRINT_COMPLETE'
+                    quantity = 1
+                    notes = f"Print completed on printer ID {p_id}"
+
+                    for (item_id,) in item_ids:
+                        if item_id: # Ensure item_id is not None
+                            # console.print(f"      Inserting stock transaction for item_id: {item_id}") # Optional debug
+                            stock_cur.execute(insert_sql, (item_id, quantity, transaction_type, completion_time, notes))
+                        else:
+                            console.print(f"    [yellow]Warning:[/yellow] Skipping stock record for NULL item_id associated with filename: {filename}")
+
+
+                    conn.commit()
+                    console.print(f"    [green]Stock transactions recorded successfully[/green] for {len(item_ids)} item(s) from file: [cyan]{filename}[/]")
+
+                except Exception as stock_e:
+                    console.print(f"    [red]Error recording stock transaction for printer ID {p_id}, file {filename}:[/red] {stock_e}")
+                    if conn:
+                        conn.rollback()
+                finally:
+                    if stock_cur:
+                        stock_cur.close()
+            # --- End Function to Record Stock ---
+
             # --- Job History Logging Function ---
             # Added remaining_time_min and percentage parameters
             def log_job_event(p_id, current_status, current_filename, prev_status, prev_filename, remaining_time_min, percentage):
@@ -308,6 +362,13 @@ if __name__ == '__main__':
                         if job_cur.rowcount > 0:
                              db_conn.commit()
                              console.print(f"  [blue]Job history END logged:[/blue] Printer ID {p_id}, File: [cyan]{prev_filename}[/], Status: {current_status}")
+
+                             # --- Add Stock Transaction on Successful Completion ---
+                             if current_status == "FINISH":
+                                 # console.print(f"  Job finished successfully. Attempting to record stock for {prev_filename}") # Optional debug
+                                 record_stock_for_completed_print(db_conn, p_id, prev_filename, now)
+                             # --- End Stock Transaction Logic ---
+
                         else:
                              console.print(f"  [yellow]Warning:[/yellow] Could not find matching unfinished job history record for printer ID {p_id}, file: {prev_filename} to mark as ended.")
                              db_conn.rollback() # Rollback if no record found to update
