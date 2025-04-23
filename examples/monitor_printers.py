@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import subprocess
 import platform
 import datetime
+import logging # Import the logging module
 from rich.console import Console
 from rich.table import Table
 
@@ -32,13 +33,26 @@ def ping_host(host):
         # print(f"Ping to {host} timed out.") # Optional: Less verbose during loop
         return False
     except Exception as e:
-        print(f"Error during ping to {host}: {e}")
+        # Log the exception, but don't necessarily print to console unless needed
+        logging.exception(f"Error during ping to host {host}")
+        # print(f"Error during ping to {host}: {e}") # Keep console clean
         return False
 
 # --- Main Script Logic ---
 if __name__ == '__main__':
+    # --- Logging Configuration ---
+    log_file = os.path.join(os.path.dirname(__file__), 'monitor_printers.log')
+    logging.basicConfig(
+        level=logging.ERROR, # Log ERROR level and above
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        filename=log_file,
+        filemode='a' # Append to the log file
+    )
+    # --- End Logging Configuration ---
+
     console = Console() # Initialize Rich Console
     console.print("[bold cyan]Starting Bambulabs Printer Continuous Monitoring Script...[/]")
+    logging.info("Monitoring script started.") # Log script start (INFO level won't go to file by default, but good practice)
 
     # Validate environment variables
     required_vars = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD']
@@ -126,7 +140,9 @@ if __name__ == '__main__':
                     # Note: We keep it in active_printers for potential later connection / cleanup
 
             except Exception as e:
-                console.print(f"[bold red]Error initializing or starting MQTT for {name}:[/bold red] {e}")
+                error_msg = f"Error initializing or starting MQTT for {name}"
+                console.print(f"[bold red]{error_msg}:[/bold red] {e}")
+                logging.exception(error_msg) # Log exception with traceback
                 # Ensure partial connections are cleaned up if init fails mid-way
                 if 'printer_client' in locals() and printer_client and hasattr(printer_client, 'mqtt_client') and printer_client.mqtt_client.is_connected():
                      try:
@@ -176,7 +192,9 @@ if __name__ == '__main__':
                     # console.print(f"  Printers table updated for printer ID {p_id}") # Optional
 
                 except Exception as db_update_e:
-                    console.print(f"  [red]Error updating printers table for printer ID {p_id}:[/red] {db_update_e}")
+                    error_msg = f"Error updating printers table for printer ID {p_id}"
+                    console.print(f"  [red]{error_msg}:[/red] {db_update_e}")
+                    logging.exception(error_msg) # Log exception with traceback
                     if db_conn: db_conn.rollback()
                 finally:
                     if update_cur: update_cur.close()
@@ -203,7 +221,9 @@ if __name__ == '__main__':
                         printer_info_dict["last_log_timestamp"] = current_time # Update last log time
                         # console.print(f"  Status logged for printer ID {p_id}") # Optional
                     except Exception as db_log_e:
-                        console.print(f"  [red]Error inserting status log for printer ID {p_id}:[/red] {db_log_e}")
+                        error_msg = f"Error inserting status log for printer ID {p_id}"
+                        console.print(f"  [red]{error_msg}:[/red] {db_log_e}")
+                        logging.exception(error_msg) # Log exception with traceback
                         if db_conn: db_conn.rollback()
                     finally:
                         if log_cur: log_cur.close()
@@ -256,7 +276,9 @@ if __name__ == '__main__':
                     console.print(f"    [green]Stock transactions recorded successfully[/green] for {len(item_data)} item(s) from file: [cyan]{filename}[/]")
 
                 except Exception as stock_e:
-                    console.print(f"    [red]Error recording stock transaction for printer ID {p_id}, file {filename}:[/red] {stock_e}")
+                    error_msg = f"Error recording stock transaction for printer ID {p_id}, file {filename}"
+                    console.print(f"    [red]{error_msg}:[/red] {stock_e}")
+                    logging.exception(error_msg) # Log exception with traceback
                     if conn:
                         conn.rollback()
                 finally:
@@ -383,12 +405,16 @@ if __name__ == '__main__':
                                  for printer in active_printers:
                                      if printer["id"] == p_id:
                                          current_job_id = printer["current_job_id"]
-                                         # Reset current_job_id after completion
-                                         printer["current_job_id"] = None
-                                         break
+                                         # We will reset the job ID *after* attempting the stock record
+                                         break # Found the printer, exit loop
 
                                  if current_job_id is not None:
                                      record_stock_for_completed_print(db_conn, p_id, prev_filename, now, current_job_id)
+                                     # Now reset the job ID in the active_printers list after the call
+                                     for printer in active_printers:
+                                         if printer["id"] == p_id:
+                                             printer["current_job_id"] = None
+                                             break
                                  else:
                                      console.print(f"  [yellow]Warning:[/yellow] Could not find current job ID for printer ID {p_id} to record stock.")
                              # --- End Stock Transaction Logic ---
@@ -399,7 +425,9 @@ if __name__ == '__main__':
 
 
                 except Exception as job_log_e:
-                    console.print(f"  [red]Error logging job event for printer ID {p_id}:[/red] {job_log_e}")
+                    error_msg = f"Error logging job event for printer ID {p_id}"
+                    console.print(f"  [red]{error_msg}:[/red] {job_log_e}")
+                    logging.exception(error_msg) # Log exception with traceback
                     if db_conn:
                         db_conn.rollback()
                 finally:
@@ -433,7 +461,9 @@ if __name__ == '__main__':
                              console.print(f"  [red]Reconnect failed for {name}.[/]")
                              continue # Skip this printer for this cycle
                     except Exception as recon_e:
-                        console.print(f"  [red]Error during reconnect attempt for {name}:[/red] {recon_e}")
+                        error_msg = f"Error during reconnect attempt for {name}"
+                        console.print(f"  [red]{error_msg}:[/red] {recon_e}")
+                        logging.exception(error_msg) # Log exception with traceback
                         continue # Skip this printer for this cycle
 
 
@@ -522,7 +552,9 @@ if __name__ == '__main__':
                     # --- End Update Previous State ---
 
                 except Exception as status_e:
-                    console.print(f"  [bold red]Error retrieving status for {name}:[/bold red] {status_e}")
+                    error_msg = f"Error retrieving status for {name}"
+                    console.print(f"  [red]{error_msg}:[/red] {status_e}")
+                    logging.exception(error_msg) # Log exception with traceback
                     # Optionally update DB with error status?
                     # update_printer_table(printer_id, "ERROR", None, None)
                     # Don't update job history or previous state on error
@@ -534,10 +566,15 @@ if __name__ == '__main__':
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Ctrl+C detected. Stopping monitoring...[/]")
+        logging.info("KeyboardInterrupt detected. Stopping monitoring.")
     except psycopg2.Error as db_e:
-        console.print(f"[bold red]Database Error:[/bold red] {db_e}")
+        error_msg = "Database Error occurred"
+        console.print(f"[bold red]{error_msg}:[/bold red] {db_e}")
+        logging.exception(error_msg) # Log exception with traceback
     except Exception as e:
-        console.print(f"[bold red]An unexpected error occurred:[/bold red] {e}")
+        error_msg = "An unexpected error occurred in the main loop"
+        console.print(f"[bold red]{error_msg}:[/bold red] {e}")
+        logging.exception(error_msg) # Log exception with traceback
     finally:
         # --- Cleanup ---
         console.print("\n[cyan]Cleaning up connections...[/]")
@@ -550,7 +587,9 @@ if __name__ == '__main__':
                     client.mqtt_stop()
                     console.print(f"[green]MQTT stopped for {name}.[/]")
                 except Exception as disconnect_e:
-                    console.print(f"[red]Error stopping MQTT for {name}:[/red] {disconnect_e}")
+                    error_msg = f"Error stopping MQTT for {name}"
+                    console.print(f"[red]{error_msg}:[/red] {disconnect_e}")
+                    logging.exception(error_msg) # Log exception with traceback
 
         if db_conn:
             db_conn.close()
