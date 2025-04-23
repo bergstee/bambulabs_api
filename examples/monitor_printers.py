@@ -98,14 +98,15 @@ if __name__ == '__main__':
 
                 # Add to active list *before* waiting for ready,
                 # so cleanup still happens if ready check fails/times out
-                # Initialize previous state tracking
+                # Initialize previous state tracking and current job ID
                 active_printers.append({
                     "id": printer_id,
                     "name": name,
                     "client": printer_client,
                     "previous_status": None,
                     "previous_filename": None,
-                    "last_log_timestamp": 0 # Initialize last log time
+                    "last_log_timestamp": 0, # Initialize last log time
+                    "current_job_id": None # Initialize current job ID
                 })
 
                 # Wait for MQTT client to be ready
@@ -209,7 +210,7 @@ if __name__ == '__main__':
             # --- End Function to Log Status Periodically ---
 
             # --- Function to Record Stock for Completed Print ---
-            def record_stock_for_completed_print(conn, p_id, filename, completion_time):
+            def record_stock_for_completed_print(conn, p_id, filename, completion_time, job_id):
                 stock_cur = None
                 try:
                     stock_cur = conn.cursor()
@@ -235,9 +236,9 @@ if __name__ == '__main__':
 
                     insert_sql = """
                         INSERT INTO stock_transactions
-                            (item_id, quantity, transaction_type, transaction_date, notes)
+                            (item_id, quantity, transaction_type, transaction_date, notes, print_job_id)
                         VALUES
-                            (%s, %s, %s, %s, %s);
+                            (%s, %s, %s, %s, %s, %s);
                     """
                     transaction_type = 'PRINT_COMPLETE'
                     notes = f"Print completed on printer ID {p_id}"
@@ -245,8 +246,8 @@ if __name__ == '__main__':
                     # Iterate through fetched item_id and quantity pairs
                     for item_id, quantity in item_data:
                         if item_id is not None and quantity is not None: # Ensure both are not None
-                            # console.print(f"      Inserting stock transaction for item_id: {item_id} with quantity: {quantity}") # Optional debug
-                            stock_cur.execute(insert_sql, (item_id, quantity, transaction_type, completion_time, notes))
+                            # console.print(f"      Inserting stock transaction for item_id: {item_id} with quantity: {quantity} and job_id: {job_id}") # Optional debug
+                            stock_cur.execute(insert_sql, (item_id, quantity, transaction_type, completion_time, notes, job_id))
                         else:
                             console.print(f"    [yellow]Warning:[/yellow] Skipping stock record due to NULL item_id ({item_id}) or quantity ({quantity}) associated with filename: {filename}")
 
@@ -338,12 +339,22 @@ if __name__ == '__main__':
 
                             start_sql = """
                                 INSERT INTO printer_job_history (printer_id, filename, start_time, status, total_print_time)
-                                VALUES (%s, %s, %s, %s, %s::interval); -- Cast the string parameter to interval
+                                VALUES (%s, %s, %s, %s, %s::interval) RETURNING id; -- Cast the string parameter to interval and return ID
                             """
                             # Pass the interval_string and actual_start_time to the parameters
                             job_cur.execute(start_sql, (p_id, current_filename, actual_start_time, current_status, interval_string))
+                            # Fetch the returned job ID
+                            job_id = job_cur.fetchone()[0]
                             db_conn.commit()
-                            console.print(f"  [green]Job history START logged:[/green] Printer ID {p_id}, File: [cyan]{current_filename}[/], Est. Start: {actual_start_time.strftime('%H:%M:%S')}")
+                            console.print(f"  [green]Job history START logged:[/green] Printer ID {p_id}, File: [cyan]{current_filename}[/], Est. Start: {actual_start_time.strftime('%H:%M:%S')}, Job ID: {job_id}")
+
+                            # Store the current job ID in the printer_info_dict
+                            # Find the correct printer_info_dict in the active_printers list
+                            for printer in active_printers:
+                                if printer["id"] == p_id:
+                                    printer["current_job_id"] = job_id
+                                    break
+
                         # else:
                             # console.print(f"  Skipping job start log: Found {existing_unfinished_count} existing unfinished job(s) for printer ID {p_id}, file: {current_filename}") # Less verbose
                             # No commit needed if we didn't insert
@@ -367,7 +378,19 @@ if __name__ == '__main__':
                              # --- Add Stock Transaction on Successful Completion ---
                              if current_status == "FINISH":
                                  # console.print(f"  Job finished successfully. Attempting to record stock for {prev_filename}") # Optional debug
-                                 record_stock_for_completed_print(db_conn, p_id, prev_filename, now)
+                                 # Find the current job ID for this printer
+                                 current_job_id = None
+                                 for printer in active_printers:
+                                     if printer["id"] == p_id:
+                                         current_job_id = printer["current_job_id"]
+                                         # Reset current_job_id after completion
+                                         printer["current_job_id"] = None
+                                         break
+
+                                 if current_job_id is not None:
+                                     record_stock_for_completed_print(db_conn, p_id, prev_filename, now, current_job_id)
+                                 else:
+                                     console.print(f"  [yellow]Warning:[/yellow] Could not find current job ID for printer ID {p_id} to record stock.")
                              # --- End Stock Transaction Logic ---
 
                         else:
