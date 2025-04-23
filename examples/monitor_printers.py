@@ -218,19 +218,20 @@ if __name__ == '__main__':
                     # Query to get item_id(s) associated with the printed file
                     # Join printer_files on filename -> printer_file_models on printer_file_id
                     query_sql = """
-                        SELECT pfm.item_id
+                        SELECT pfm.item_id, pfm.quantity
                         FROM printer_file_models pfm
-                        JOIN printer_files pf ON pfm.printer_file_id = pf.id -- Corrected JOIN condition
+                        JOIN printer_files pf ON pfm.printer_file_id = pf.id
                         WHERE pf.filename = %s;
                     """
                     stock_cur.execute(query_sql, (filename,))
-                    item_ids = stock_cur.fetchall()
+                    # Fetch all results, each row will be (item_id, quantity)
+                    item_data = stock_cur.fetchall()
 
-                    if not item_ids:
-                        console.print(f"    [yellow]Warning:[/yellow] No associated item IDs found in printer_file_models for filename: {filename}. Cannot record stock.")
+                    if not item_data:
+                        console.print(f"    [yellow]Warning:[/yellow] No associated item IDs or quantities found in printer_file_models for filename: {filename}. Cannot record stock.")
                         return # No items to record
 
-                    # console.print(f"    Found {len(item_ids)} item ID(s) to record stock for.") # Optional debug
+                    # console.print(f"    Found {len(item_data)} item(s) with quantities to record stock for.") # Optional debug
 
                     insert_sql = """
                         INSERT INTO stock_transactions
@@ -239,19 +240,19 @@ if __name__ == '__main__':
                             (%s, %s, %s, %s, %s);
                     """
                     transaction_type = 'PRINT_COMPLETE'
-                    quantity = 1
                     notes = f"Print completed on printer ID {p_id}"
 
-                    for (item_id,) in item_ids:
-                        if item_id: # Ensure item_id is not None
-                            # console.print(f"      Inserting stock transaction for item_id: {item_id}") # Optional debug
+                    # Iterate through fetched item_id and quantity pairs
+                    for item_id, quantity in item_data:
+                        if item_id is not None and quantity is not None: # Ensure both are not None
+                            # console.print(f"      Inserting stock transaction for item_id: {item_id} with quantity: {quantity}") # Optional debug
                             stock_cur.execute(insert_sql, (item_id, quantity, transaction_type, completion_time, notes))
                         else:
-                            console.print(f"    [yellow]Warning:[/yellow] Skipping stock record for NULL item_id associated with filename: {filename}")
+                            console.print(f"    [yellow]Warning:[/yellow] Skipping stock record due to NULL item_id ({item_id}) or quantity ({quantity}) associated with filename: {filename}")
 
 
                     conn.commit()
-                    console.print(f"    [green]Stock transactions recorded successfully[/green] for {len(item_ids)} item(s) from file: [cyan]{filename}[/]")
+                    console.print(f"    [green]Stock transactions recorded successfully[/green] for {len(item_data)} item(s) from file: [cyan]{filename}[/]")
 
                 except Exception as stock_e:
                     console.print(f"    [red]Error recording stock transaction for printer ID {p_id}, file {filename}:[/red] {stock_e}")
