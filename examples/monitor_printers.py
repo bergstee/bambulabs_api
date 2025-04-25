@@ -229,63 +229,6 @@ if __name__ == '__main__':
                         if log_cur: log_cur.close()
             # --- End Function to Log Status Periodically ---
 
-            # --- Function to Record Stock for Completed Print ---
-            def record_stock_for_completed_print(conn, p_id, filename, completion_time, job_id):
-                stock_cur = None
-                try:
-                    stock_cur = conn.cursor()
-                    # console.print(f"    Querying item IDs for filename: {filename}") # Optional debug
-
-                    # Query to get item_id(s) associated with the printed file
-                    # Join printer_files on filename -> printer_file_models on printer_file_id
-                    query_sql = """
-                        SELECT pfm.item_id, pfm.quantity
-                        FROM printer_file_models pfm
-                        JOIN printer_files pf ON pfm.printer_file_id = pf.id
-                        WHERE pf.filename = %s;
-                    """
-                    stock_cur.execute(query_sql, (filename,))
-                    # Fetch all results, each row will be (item_id, quantity)
-                    item_data = stock_cur.fetchall()
-
-                    if not item_data:
-                        console.print(f"    [yellow]Warning:[/yellow] No associated item IDs or quantities found in printer_file_models for filename: {filename}. Cannot record stock.")
-                        return # No items to record
-
-                    # console.print(f"    Found {len(item_data)} item(s) with quantities to record stock for.") # Optional debug
-
-                    insert_sql = """
-                        INSERT INTO stock_transactions
-                            (item_id, quantity, transaction_type, transaction_date, notes, print_job_id)
-                        VALUES
-                            (%s, %s, %s, %s, %s, %s);
-                    """
-                    transaction_type = 'PRINT_COMPLETE'
-                    notes = f"Print completed on printer ID {p_id}"
-
-                    # Iterate through fetched item_id and quantity pairs
-                    for item_id, quantity in item_data:
-                        if item_id is not None and quantity is not None: # Ensure both are not None
-                            # console.print(f"      Inserting stock transaction for item_id: {item_id} with quantity: {quantity} and job_id: {job_id}") # Optional debug
-                            stock_cur.execute(insert_sql, (item_id, quantity, transaction_type, completion_time, notes, job_id))
-                        else:
-                            console.print(f"    [yellow]Warning:[/yellow] Skipping stock record due to NULL item_id ({item_id}) or quantity ({quantity}) associated with filename: {filename}")
-
-
-                    conn.commit()
-                    console.print(f"    [green]Stock transactions recorded successfully[/green] for {len(item_data)} item(s) from file: [cyan]{filename}[/]")
-
-                except Exception as stock_e:
-                    error_msg = f"Error recording stock transaction for printer ID {p_id}, file {filename}"
-                    console.print(f"    [red]{error_msg}:[/red] {stock_e}")
-                    logging.exception(error_msg) # Log exception with traceback
-                    if conn:
-                        conn.rollback()
-                finally:
-                    if stock_cur:
-                        stock_cur.close()
-            # --- End Function to Record Stock ---
-
             # --- Job History Logging Function ---
             # Added remaining_time_min and percentage parameters
             def log_job_event(p_id, current_status, current_filename, prev_status, prev_filename, remaining_time_min, percentage):
@@ -397,26 +340,14 @@ if __name__ == '__main__':
                              db_conn.commit()
                              console.print(f"  [blue]Job history END logged:[/blue] Printer ID {p_id}, File: [cyan]{prev_filename}[/], Status: {current_status}")
 
-                             # --- Add Stock Transaction on Successful Completion ---
+                             # --- Stock Transaction will be handled by database trigger ---
                              if current_status == "FINISH":
-                                 # console.print(f"  Job finished successfully. Attempting to record stock for {prev_filename}") # Optional debug
-                                 # Find the current job ID for this printer
-                                 current_job_id = None
+                                 console.print(f"  [green]Job finished successfully.[/green] Stock transaction will be handled by database trigger for file: [cyan]{prev_filename}[/]")
+                                 # Reset the job ID in the active_printers list
                                  for printer in active_printers:
                                      if printer["id"] == p_id:
-                                         current_job_id = printer["current_job_id"]
-                                         # We will reset the job ID *after* attempting the stock record
-                                         break # Found the printer, exit loop
-
-                                 if current_job_id is not None:
-                                     record_stock_for_completed_print(db_conn, p_id, prev_filename, now, current_job_id)
-                                     # Now reset the job ID in the active_printers list after the call
-                                     for printer in active_printers:
-                                         if printer["id"] == p_id:
-                                             printer["current_job_id"] = None
-                                             break
-                                 else:
-                                     console.print(f"  [yellow]Warning:[/yellow] Could not find current job ID for printer ID {p_id} to record stock.")
+                                         printer["current_job_id"] = None
+                                         break
                              # --- End Stock Transaction Logic ---
 
                         else:
