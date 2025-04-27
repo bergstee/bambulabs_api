@@ -1073,7 +1073,7 @@ class PrinterMQTTClient:
             NozzleType: nozzle diameter
         """
         return NozzleType(
-            self.__get_print("nozzle_diameter", "stainless_steel"))
+            self.__get_print("nozzle_type", "stainless_steel"))
 
     def set_nozzle_info(
             self,
