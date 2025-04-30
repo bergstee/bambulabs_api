@@ -174,7 +174,7 @@ class Printer:
 
         Returns
         -------
-        str
+        GcodeState
             The state of the printer.
         """
         return self.mqtt_client.get_printer_state()

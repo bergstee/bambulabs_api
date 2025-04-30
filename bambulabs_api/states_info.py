@@ -98,7 +98,7 @@ class PrintStatus(Enum):
         return self.name
 
 
-class GcodeState(Enum):
+class GcodeState(str, Enum):
     """
     Enum class for the Gcode State
 
@@ -127,4 +127,4 @@ class GcodeState(Enum):
         return cls.UNKNOWN
 
     def __str__(self):
-        return self.name
+        return self.value
