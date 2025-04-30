@@ -14,7 +14,7 @@ NOZZLE_DIAMETER = {
 }
 
 
-class PrinterType(str, Enum):
+class PrinterType(Enum):
     """
     Enum class for the printer type
 
@@ -34,6 +34,9 @@ class PrinterType(str, Enum):
     X1C = "X1C"
     X1E = "X1E"
 
+    def __str__(self):
+        return self.name
+
 
 @dataclass
 class PrinterFirmwareInfo:
@@ -41,7 +44,7 @@ class PrinterFirmwareInfo:
     firmware_version: str
 
 
-class P1FirmwareVersion(str, Enum):
+class P1FirmwareVersion(Enum):
     V_01_07_00_00 = "01.07.00.00"
     V_01_06_01_02 = "01.06.01.02"
     V_01_06_01_00 = "01.06.01.00"
@@ -52,8 +55,11 @@ class P1FirmwareVersion(str, Enum):
     V_01_04_01_00 = "01.04.01.00"
     V_01_04_00_00 = "01.04.00.00"
 
+    def __str__(self):
+        return self.name
 
-class NozzleType(str, Enum):
+
+class NozzleType(Enum):
     """
     Enum class for the nozzle type
 
@@ -64,3 +70,6 @@ class NozzleType(str, Enum):
     """
     STAINLESS_STEEL = "stainless_steel"
     HARDENED_STEEL = "hardened_steel"
+
+    def __str__(self):
+        return self.name
