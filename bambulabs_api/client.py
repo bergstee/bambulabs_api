@@ -12,7 +12,7 @@ from typing import Any, BinaryIO
 from bambulabs_api.ams import AMSHub
 from bambulabs_api.filament_info import FilamentTray
 from bambulabs_api.printer_info import NozzleType
-from bambulabs_api.states_info import PrintStatus
+from bambulabs_api.states_info import PrintStatus, GcodeState
 from .camera_client import PrinterCamera
 from .ftp_client import PrinterFTPClient
 from .mqtt_client import PrinterMQTTClient
@@ -168,16 +168,16 @@ class Printer:
         """
         return self.mqtt_client.get_last_print_percentage()
 
-    def get_state(self) -> str:
+    def get_state(self) -> GcodeState:
         """
         Get the state of the printer.
 
         Returns
         -------
-        str
+        GcodeState
             The state of the printer.
         """
-        return self.mqtt_client.get_printer_state().name
+        return self.mqtt_client.get_printer_state()
 
     def get_print_speed(self) -> int:
         """
@@ -213,6 +213,18 @@ class Printer:
         None if the printer is not printing.
         """
         return self.mqtt_client.get_nozzle_temperature()
+
+    def get_chamber_temperature(self) -> float | None:
+        """
+        Get the chamber temperature of the printer.
+
+        Returns
+        -------
+        float
+            The chamber temperature of the printer.
+        None if the printer is not printing.
+        """
+        return self.mqtt_client.get_chamber_temperature()
 
     def nozzle_type(self) -> NozzleType:
         """
@@ -746,3 +758,12 @@ class Printer:
             str: print type
         """
         return self.mqtt_client.print_type()
+
+    def wifi_signal(self) -> str:
+        """
+        Get Wifi signal in dBm
+
+        Returns:
+            str: Wifi signal
+        """
+        return self.mqtt_client.wifi_signal()

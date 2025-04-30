@@ -399,7 +399,7 @@ class PrinterMQTTClient:
         Get the printer state
 
         Returns:
-            PrintStatus: printer state
+            GcodeState: printer state
         """
         return GcodeState(self.__get_print("gcode_state", -1))
 
@@ -1029,6 +1029,15 @@ class PrinterMQTTClient:
         """
         return float(self.__get_print("nozzle_target_temper", 0.0))
 
+    def get_chamber_temperature(self) -> float:
+        """
+        Get the chamber temperature
+
+        Returns:
+            float: chamber temperature
+        """
+        return float(self.__get_print("chamber_temper", 0.0))
+
     def current_layer_num(self) -> int:
         """
         Get the number of layers of the current/last print
@@ -1263,3 +1272,12 @@ class PrinterMQTTClient:
             str: print type
         """
         return self.__get_print("print_type")
+
+    def wifi_signal(self) -> str:
+        """
+        Get Wifi signal in dBm
+
+        Returns:
+            str: Wifi signal
+        """
+        return self.__get_print("wifi_signal", "")

@@ -94,6 +94,9 @@ class PrintStatus(Enum):
     def _missing_(cls, value):
         return cls.UNKNOWN
 
+    def __str__(self):
+        return self.name
+
 
 class GcodeState(str, Enum):
     """
@@ -122,3 +125,6 @@ class GcodeState(str, Enum):
     @classmethod
     def _missing_(cls, value):
         return cls.UNKNOWN
+
+    def __str__(self):
+        return self.value

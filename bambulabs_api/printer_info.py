@@ -34,6 +34,9 @@ class PrinterType(str, Enum):
     X1C = "X1C"
     X1E = "X1E"
 
+    def __str__(self):
+        return self.value
+
 
 @dataclass
 class PrinterFirmwareInfo:
@@ -52,6 +55,9 @@ class P1FirmwareVersion(str, Enum):
     V_01_04_01_00 = "01.04.01.00"
     V_01_04_00_00 = "01.04.00.00"
 
+    def __str__(self):
+        return self.value
+
 
 class NozzleType(str, Enum):
     """
@@ -64,3 +70,6 @@ class NozzleType(str, Enum):
     """
     STAINLESS_STEEL = "stainless_steel"
     HARDENED_STEEL = "hardened_steel"
+
+    def __str__(self):
+        return self.value
