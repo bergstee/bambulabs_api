@@ -1,9 +1,12 @@
 import ftplib
 from io import BytesIO
 import ssl
+from PIL import Image
 
 import logging
 from typing import Any, BinaryIO
+
+from PIL.ImageFile import ImageFile
 
 
 class ImplicitFTP_TLS(ftplib.FTP_TLS):
@@ -19,7 +22,7 @@ class ImplicitFTP_TLS(ftplib.FTP_TLS):
         return self._sock
 
     @sock.setter
-    def sock(self, value):
+    def sock(self, value):  # type: ignore
         """When modifying the socket, ensure that it is ssl wrapped."""
         if value is not None and not isinstance(value, ssl.SSLSocket):
             value = self.context.wrap_socket(value)
@@ -89,29 +92,97 @@ class PrinterFTPClient:
                                  callback=lambda x: logging.debug(f"Uploaded {x} bytes"))   # noqa  # pylint: disable=logging-fstring-interpolation
 
     @connect_and_run
-    def list_directory(self, path: str | None = None):
-        lines = []
+    def list_directory(self, path: str | None = None) -> tuple[str, list[str]]:
+        """
+        List paths in the given directory.
+
+        Args:
+            path (str | None): Path to check. Default None.
+
+        Returns:
+            tuple[str, list[str]]: ftp result and list of paths in directory.
+        """
+        lines: list[str] = []
         res = self.ftps.retrlines(
             f'LIST {path if path is not None else ""}',
             lines.append)
         return res, lines
 
-    def list_images_dir(self):
+    def list_images_dir(self) -> tuple[str, list[str]]:
+        """
+        List paths in the image directory.
+
+        Returns:
+            tuple[str, list[str]]: ftp result and list of files in image
+                directory.
+        """
         return self.list_directory("image")
 
-    def list_cache_dir(self):
+    def list_cache_dir(self) -> tuple[str, list[str]]:
+        """
+        List paths in the cache directory.
+
+        Returns:
+            tuple[str, list[str]]: ftp result and list of files in cache
+                directory.
+        """
         return self.list_directory("cache")
 
-    def list_timelapse_dir(self):
+    def list_timelapse_dir(self) -> tuple[str, list[str]]:
+        """
+        List paths in the timelapse directory.
+
+        Returns:
+            tuple[str, list[str]]: ftp result and list of files in timelapse
+                directory.
+        """
         return self.list_directory("timelapse")
 
-    def list_logger_dir(self):
+    def list_logger_dir(self) -> tuple[str, list[str]]:
+        """
+        List paths in the logger directory.
+
+        Returns:
+            tuple[str, list[str]]: ftp result and list of files in logger
+                directory.
+        """
         return self.list_directory("logger")
 
+    def last_image_print(self) -> ImageFile | None:
+        """
+        Get the last image stored in the image directory - generally the
+        preview of the last print.
+
+        Returns:
+            ImageFile | None: last file/image in the image directory,
+                otherwise None.
+        """
+        _, img_dir = self.list_images_dir()
+        if img_dir:
+            img_path = img_dir[-1].split(" ")[-1]
+            b = self.download_file(f"image/{img_path}")
+            return Image.open(b)
+
+        return None
+
     @connect_and_run
-    def download_file(self, file_path: str):
+    def download_file(
+            self,
+            file_path: str,
+            blocksize: int = 524288) -> BytesIO:
+        """
+        Get the last image stored in the image directory - generally the
+        preview of the last print.
+
+        Args:
+            file_path (str): path of file to download.
+            blocksize (int): block size. Default: 524288.
+
+        Returns:
+            BytesIO: downloaded file in BytesIO.
+        """
         b = BytesIO()
-        self.ftps.retrbinary(f'RETR {file_path}', b.write)
+        self.ftps.retrbinary(f'RETR {file_path}', b.write, blocksize=blocksize)
         return b
 
     @connect_and_run
