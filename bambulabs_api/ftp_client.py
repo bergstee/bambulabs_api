@@ -1,3 +1,6 @@
+__all__ = ["PrinterFTPClient"]
+
+
 import ftplib
 from io import BytesIO
 import ssl
