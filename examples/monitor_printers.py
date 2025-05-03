@@ -367,6 +367,79 @@ if __name__ == '__main__':
             # --- End Job History Logging Function ---
 
 
+            # --- Retry Unreachable Printers ---
+            current_time = time.time()
+            if unreachable_printers and (current_time - last_retry_attempt_time >= RETRY_INTERVAL_SECONDS):
+                console.print(f"\n[bold blue]--- Attempting to reconnect unreachable printers ({len(unreachable_printers)} found) ---[/]")
+                last_retry_attempt_time = current_time # Update last attempt time
+                printers_to_remove_from_unreachable = [] # Keep track of successfully reconnected printers
+
+                for printer_data_tuple in unreachable_printers:
+                    printer_id, name, ip, serial, access_code = printer_data_tuple
+                    console.print(f"  Retrying connection for: [bold magenta]{name}[/] (ID: {printer_id}, IP: {ip})")
+
+                    # 1. Ping Check
+                    if not ping_host(ip):
+                        console.print(f"    [yellow]Ping failed for {name} ({ip}). Will retry later.[/]")
+                        continue # Try next unreachable printer
+                    console.print(f"    [green]Ping successful for {name} ({ip}).[/]")
+
+                    # 2. Create and Connect
+                    try:
+                        console.print(f"    Initializing API for [bold magenta]{name}[/]...")
+                        printer_client = bl.Printer(ip, access_code, serial)
+                        console.print(f"    Starting MQTT for [bold magenta]{name}[/]...")
+                        printer_client.mqtt_start()
+                        console.print(f"    [green]MQTT started for {name}.[/]")
+
+                        # 3. Wait for MQTT ready
+                        console.print("    Waiting for MQTT client to receive initial data...")
+                        start_wait_time = time.time()
+                        timeout = 10 # seconds
+                        ready = False
+                        while time.time() - start_wait_time < timeout:
+                            if printer_client.mqtt_client.ready():
+                                console.print(f"    [green]MQTT client for {name} is ready.[/]")
+                                ready = True
+                                break
+                            time.sleep(0.5)
+
+                        if ready:
+                            console.print(f"    [bold green]Successfully reconnected to {name}! Adding to active list.[/]")
+                            # Add to active list
+                            active_printers.append({
+                                "id": printer_id,
+                                "name": name,
+                                "client": printer_client,
+                                "previous_status": None, # Initialize state
+                                "previous_filename": None,
+                                "last_log_timestamp": 0,
+                                "current_job_id": None
+                            })
+                            # Mark for removal from unreachable list
+                            printers_to_remove_from_unreachable.append(printer_data_tuple)
+                        else:
+                            console.print(f"    [yellow]Timeout:[/yellow] MQTT client for {name} did not become ready. Will retry later.")
+                            # Ensure MQTT is stopped if connection failed mid-way
+                            if printer_client and hasattr(printer_client, 'mqtt_client') and printer_client.mqtt_client.is_connected():
+                                try: printer_client.mqtt_stop()
+                                except Exception: pass
+
+                    except Exception as retry_e:
+                        error_msg = f"Error during retry connection for {name}"
+                        console.print(f"    [bold red]{error_msg}:[/bold red] {retry_e}")
+                        logging.exception(f"{error_msg} (during retry)") # Log exception with traceback
+                        # Ensure MQTT is stopped if connection failed mid-way
+                        if 'printer_client' in locals() and printer_client and hasattr(printer_client, 'mqtt_client') and printer_client.mqtt_client.is_connected():
+                            try: printer_client.mqtt_stop()
+                            except Exception: pass
+
+                # Remove successfully reconnected printers from the unreachable list
+                if printers_to_remove_from_unreachable:
+                    unreachable_printers = [p for p in unreachable_printers if p not in printers_to_remove_from_unreachable]
+                    console.print(f"[bold blue]--- Finished retry attempt. {len(unreachable_printers)} printers remaining unreachable. ---[/]")
+            # --- End Retry Unreachable Printers ---
+
             for printer_info in active_printers:
                 printer_id = printer_info["id"]
                 name = printer_info["name"]
@@ -375,7 +448,7 @@ if __name__ == '__main__':
                 previous_filename = printer_info.get("previous_filename")
                 # No need to get last_log_timestamp here, function handles it
 
-                console.print(f"Checking: [bold magenta]{name}[/] (ID: {printer_id})")
+                console.print(f"\nChecking Active Printer: [bold magenta]{name}[/] (ID: {printer_id})") # Added newline for clarity
 
                 # Check if MQTT client is still connected and ready
                 if not client.mqtt_client.is_connected():
@@ -490,9 +563,9 @@ if __name__ == '__main__':
                     # update_printer_table(printer_id, "ERROR", None, None)
                     # Don't update job history or previous state on error
 
-            # Wait before next cycle
-            console.print("-" * 40, style="dim")
-            console.print(f"Waiting for 10 seconds before next check...", style="dim")
+            # Wait before next full cycle (including potential retry)
+            console.print("\n" + "-" * 40, style="dim")
+            console.print(f"Waiting for 10 seconds before next check cycle...", style="dim")
             time.sleep(10) # Check every 10 seconds
 
     except KeyboardInterrupt:
