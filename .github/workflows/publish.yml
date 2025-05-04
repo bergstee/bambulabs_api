@@ -113,9 +113,9 @@ jobs:
         run: |
           if [ -f docs/release/${{ env.VERSION }}-notes.md ]; then
             echo "Releasing ${{ env.VERSION }}"
-            gh release create "${{ env.VERSION }}" --latest --repo "${{ github.repository }}" -F "docs/release/${{ env.VERSION }}-notes.md"
+            gh release create "${{ env.VERSION }}" -t ${{ env.VERSION }} --latest --repo "${{ github.repository }}" -F "docs/release/${{ env.VERSION }}-notes.md"
           else
-            gh release create "${{ env.VERSION }}" --latest --repo "${{ github.repository }}" --notes ""
+            gh release create "${{ env.VERSION }}" -t ${{ env.VERSION }} --latest --repo "${{ github.repository }}" --notes ""
           fi
       
       - name: Upload artifact signatures to GitHub Release
