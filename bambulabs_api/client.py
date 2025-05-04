@@ -342,6 +342,7 @@ class Printer:
                     use_ams: bool = True,
                     ams_mapping: list[int] = [0],
                     skip_objects: list[int] | None = None,
+                    flow_calibration: bool = True,
                     ) -> bool:
         """
         Start printing a file.
@@ -360,6 +361,8 @@ class Printer:
             by default [0].
         skip_objects (list[int] | None, optional): List of gcode objects to
             skip. Defaults to None.
+        flow_calibration : bool, optional
+            Whether to use the automatic flow calibrationn, by default True.
 
         Returns
         -------
@@ -370,7 +373,8 @@ class Printer:
                                                 plate_number,
                                                 use_ams,
                                                 ams_mapping,
-                                                skip_objects)
+                                                skip_objects,
+                                                flow_calibration)
 
     def stop_print(self) -> bool:
         """
