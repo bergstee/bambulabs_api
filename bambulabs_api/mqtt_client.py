@@ -469,6 +469,7 @@ class PrinterMQTTClient:
                         use_ams: bool = True,
                         ams_mapping: list[int] = [0],
                         skip_objects: list[int] | None = None,
+                        flow_calibration: bool = True,
                         ) -> bool:
         """
         Start the print
@@ -501,7 +502,7 @@ class PrinterMQTTClient:
                     "file": filename,
                     "bed_leveling": True,
                     "bed_type": "textured_plate",
-                    "flow_cali": True,
+                    "flow_cali": bool(flow_calibration),
                     "vibration_cali": True,
                     "url": f"ftp:///{filename}",
                     "layer_inspect": False,
