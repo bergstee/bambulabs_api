@@ -399,7 +399,7 @@ class PrinterMQTTClient:
         Get the printer state
 
         Returns:
-            PrintStatus: printer state
+            GcodeState: printer state
         """
         return GcodeState(self.__get_print("gcode_state", -1))
 
@@ -469,6 +469,7 @@ class PrinterMQTTClient:
                         use_ams: bool = True,
                         ams_mapping: list[int] = [0],
                         skip_objects: list[int] | None = None,
+                        flow_calibration: bool = True,
                         ) -> bool:
         """
         Start the print
@@ -501,7 +502,7 @@ class PrinterMQTTClient:
                     "file": filename,
                     "bed_leveling": True,
                     "bed_type": "textured_plate",
-                    "flow_cali": True,
+                    "flow_cali": bool(flow_calibration),
                     "vibration_cali": True,
                     "url": f"ftp:///{filename}",
                     "layer_inspect": False,
@@ -1029,6 +1030,15 @@ class PrinterMQTTClient:
         """
         return float(self.__get_print("nozzle_target_temper", 0.0))
 
+    def get_chamber_temperature(self) -> float:
+        """
+        Get the chamber temperature
+
+        Returns:
+            float: chamber temperature
+        """
+        return float(self.__get_print("chamber_temper", 0.0))
+
     def current_layer_num(self) -> int:
         """
         Get the number of layers of the current/last print
@@ -1073,7 +1083,7 @@ class PrinterMQTTClient:
             NozzleType: nozzle diameter
         """
         return NozzleType(
-            self.__get_print("nozzle_diameter", "stainless_steel"))
+            self.__get_print("nozzle_type", "stainless_steel"))
 
     def set_nozzle_info(
             self,
@@ -1263,3 +1273,12 @@ class PrinterMQTTClient:
             str: print type
         """
         return self.__get_print("print_type")
+
+    def wifi_signal(self) -> str:
+        """
+        Get Wifi signal in dBm
+
+        Returns:
+            str: Wifi signal
+        """
+        return self.__get_print("wifi_signal", "")
