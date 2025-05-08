@@ -154,6 +154,10 @@ if __name__ == '__main__':
             console.print("[bold red]No printers could be successfully initialized and connected via MQTT. Exiting.[/]")
             sys.exit(0)
 
+# --- Initialization for Unreachable Printer Retry Logic ---
+        unreachable_printers = [] # List to hold (printer_id, name, ip, serial, access_code) tuples
+        RETRY_INTERVAL_SECONDS = 300 # Check every 5 minutes
+        last_retry_attempt_time = 0 # Initialize to ensure first check runs if needed
         console.print("\n[bold cyan]--- Starting Continuous Monitoring Loop (Press Ctrl+C to stop) ---[/]")
 
         # --- Continuous Monitoring Loop ---
