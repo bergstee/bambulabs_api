@@ -95,15 +95,13 @@ class Printer:
 
     def mqtt_start(self):
         """
-        Start the camera
+        Start the mqtt client
 
-        Returns
-        -------
-        bool
-            If the camera successfully connected
+        Returns:
+            MQTTErrorCode: error code of loop start
         """
         self.mqtt_client.connect()
-        self.mqtt_client.start()
+        return self.mqtt_client.start()
 
     def mqtt_stop(self):
         """
