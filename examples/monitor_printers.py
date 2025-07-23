@@ -27,7 +27,7 @@ def ping_host(host):
     param = '-n' if platform.system().lower() == 'windows' else '-c'
     command = ['ping', param, '1', host]
     try:
-        response = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+        response = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
         return response.returncode == 0
     except subprocess.TimeoutExpired:
         # print(f"Ping to {host} timed out.") # Optional: Less verbose during loop
@@ -50,7 +50,7 @@ if __name__ == '__main__':
     )
     # --- End Logging Configuration ---
 
-    console = Console() # Initialize Rich Console
+    console = Console(legacy_windows=True) # Initialize Rich Console for Windows compatibility
     console.print("[bold cyan]Starting Bambulabs Printer Continuous Monitoring Script...[/]")
     logging.info("Monitoring script started.") # Log script start (INFO level won't go to file by default, but good practice)
 
@@ -203,6 +203,145 @@ if __name__ == '__main__':
                 finally:
                     if update_cur: update_cur.close()
             # --- End Function to Update Printers Table ---
+
+            # --- Function to Update Filament Information ---
+            def update_filament_table(p_id, p_current_filament_info, p_ams_filament_info):
+                filament_cur = None
+                try:
+                    now = datetime.datetime.now()
+                    filament_cur = db_conn.cursor()
+                    
+                    # First, mark all filaments for this printer as inactive
+                    filament_cur.execute("""
+                        UPDATE printer_filaments
+                        SET is_active = FALSE, updated_at = %s
+                        WHERE printer_id = %s
+                    """, (now, p_id))
+                    
+                    # Store current active filament (external spool or AMS)
+                    if p_current_filament_info:
+                        db_info = p_current_filament_info.get('db_info')
+                        
+                        # Prepare filament data
+                        filament_data = {
+                            'filament_id': p_current_filament_info.get('tray_info_idx'),
+                            'filament_name': db_info.get('db_name') if db_info else None,
+                            'filament_type': p_current_filament_info.get('type'),
+                            'filament_color': p_current_filament_info.get('color'),
+                            'filament_vendor': db_info.get('db_vendor') if db_info else p_current_filament_info.get('brand'),
+                            'temp_min': db_info.get('db_temp_min') if db_info else p_current_filament_info.get('temp_min'),
+                            'temp_max': db_info.get('db_temp_max') if db_info else p_current_filament_info.get('temp_max'),
+                            'bed_temp': db_info.get('db_bed_temp') if db_info else p_current_filament_info.get('bed_temp'),
+                            'weight': p_current_filament_info.get('weight'),
+                            'cost': db_info.get('db_cost') if db_info else None,
+                            'density': db_info.get('db_density') if db_info else None,
+                            'diameter': db_info.get('db_diameter') if db_info else p_current_filament_info.get('diameter'),
+                            'tray_uuid': p_current_filament_info.get('tray_uuid')
+                        }
+                        
+                        # Insert or update active filament (external spool - ams_id and tray_id are NULL)
+                        filament_cur.execute("""
+                            INSERT INTO printer_filaments (
+                                printer_id, ams_id, tray_id, filament_id, filament_name, filament_type,
+                                filament_color, filament_vendor, temp_min, temp_max, bed_temp,
+                                weight, cost, density, diameter, tray_uuid, is_active, detected_at, updated_at
+                            ) VALUES (
+                                %s, NULL, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s
+                            ) ON CONFLICT (printer_id, ams_id, tray_id)
+                            DO UPDATE SET
+                                filament_id = EXCLUDED.filament_id,
+                                filament_name = EXCLUDED.filament_name,
+                                filament_type = EXCLUDED.filament_type,
+                                filament_color = EXCLUDED.filament_color,
+                                filament_vendor = EXCLUDED.filament_vendor,
+                                temp_min = EXCLUDED.temp_min,
+                                temp_max = EXCLUDED.temp_max,
+                                bed_temp = EXCLUDED.bed_temp,
+                                weight = EXCLUDED.weight,
+                                cost = EXCLUDED.cost,
+                                density = EXCLUDED.density,
+                                diameter = EXCLUDED.diameter,
+                                tray_uuid = EXCLUDED.tray_uuid,
+                                is_active = TRUE,
+                                updated_at = EXCLUDED.updated_at
+                        """, (
+                            p_id, filament_data['filament_id'], filament_data['filament_name'],
+                            filament_data['filament_type'], filament_data['filament_color'],
+                            filament_data['filament_vendor'], filament_data['temp_min'],
+                            filament_data['temp_max'], filament_data['bed_temp'],
+                            filament_data['weight'], filament_data['cost'],
+                            filament_data['density'], filament_data['diameter'],
+                            filament_data['tray_uuid'], now, now
+                        ))
+                    
+                    # Store all AMS filament information
+                    if p_ams_filament_info:
+                        for ams in p_ams_filament_info:
+                            ams_id = ams['ams_id']
+                            for tray in ams['trays']:
+                                db_info = tray.get('db_info')
+                                
+                                # Prepare tray data
+                                tray_data = {
+                                    'filament_id': tray.get('tray_info_idx'),
+                                    'filament_name': db_info.get('db_name') if db_info else None,
+                                    'filament_type': tray.get('type'),
+                                    'filament_color': tray.get('color'),
+                                    'filament_vendor': db_info.get('db_vendor') if db_info else tray.get('brand'),
+                                    'temp_min': db_info.get('db_temp_min') if db_info else tray.get('temp_min'),
+                                    'temp_max': db_info.get('db_temp_max') if db_info else tray.get('temp_max'),
+                                    'bed_temp': db_info.get('db_bed_temp') if db_info else tray.get('bed_temp'),
+                                    'weight': tray.get('weight'),
+                                    'cost': db_info.get('db_cost') if db_info else None,
+                                    'density': db_info.get('db_density') if db_info else None,
+                                    'diameter': db_info.get('db_diameter') if db_info else tray.get('diameter'),
+                                    'tray_uuid': tray.get('uuid')
+                                }
+                                
+                                # Insert or update AMS tray filament
+                                filament_cur.execute("""
+                                    INSERT INTO printer_filaments (
+                                        printer_id, ams_id, tray_id, filament_id, filament_name, filament_type,
+                                        filament_color, filament_vendor, temp_min, temp_max, bed_temp,
+                                        weight, cost, density, diameter, tray_uuid, is_active, detected_at, updated_at
+                                    ) VALUES (
+                                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, %s, %s
+                                    ) ON CONFLICT (printer_id, ams_id, tray_id)
+                                    DO UPDATE SET
+                                        filament_id = EXCLUDED.filament_id,
+                                        filament_name = EXCLUDED.filament_name,
+                                        filament_type = EXCLUDED.filament_type,
+                                        filament_color = EXCLUDED.filament_color,
+                                        filament_vendor = EXCLUDED.filament_vendor,
+                                        temp_min = EXCLUDED.temp_min,
+                                        temp_max = EXCLUDED.temp_max,
+                                        bed_temp = EXCLUDED.bed_temp,
+                                        weight = EXCLUDED.weight,
+                                        cost = EXCLUDED.cost,
+                                        density = EXCLUDED.density,
+                                        diameter = EXCLUDED.diameter,
+                                        tray_uuid = EXCLUDED.tray_uuid,
+                                        updated_at = EXCLUDED.updated_at
+                                """, (
+                                    p_id, ams_id, tray['tray_id'], tray_data['filament_id'],
+                                    tray_data['filament_name'], tray_data['filament_type'],
+                                    tray_data['filament_color'], tray_data['filament_vendor'],
+                                    tray_data['temp_min'], tray_data['temp_max'], tray_data['bed_temp'],
+                                    tray_data['weight'], tray_data['cost'], tray_data['density'],
+                                    tray_data['diameter'], tray_data['tray_uuid'], now, now
+                                ))
+                    
+                    db_conn.commit()
+                    # console.print(f"  Filament information updated for printer ID {p_id}") # Optional
+                    
+                except Exception as filament_update_e:
+                    error_msg = f"Error updating filament information for printer ID {p_id}"
+                    console.print(f"  [red]{error_msg}:[/red] {filament_update_e}")
+                    logging.exception(error_msg)
+                    if db_conn: db_conn.rollback()
+                finally:
+                    if filament_cur: filament_cur.close()
+            # --- End Function to Update Filament Information ---
 
             # --- Function to Log Status Periodically ---
             LOG_INTERVAL_SECONDS = 300 # 5 minutes
@@ -489,6 +628,169 @@ if __name__ == '__main__':
                     bed_temp = client.get_bed_temperature()
                     nozzle_temp = client.get_nozzle_temperature()
                     remaining_time_min = client.get_time() # In minutes
+                    
+                    # Get filament information with database lookup
+                    current_filament_info = None
+                    ams_filament_info = []
+                    
+                    def get_filament_from_database(filament_id):
+                        """Look up filament information from the database."""
+                        if not filament_id or filament_id == 'N/A':
+                            return None
+                        
+                        try:
+                            db_cur = db_conn.cursor()
+                            db_cur.execute("""
+                                SELECT name, material_type, vendor, nozzle_temp_min, nozzle_temp_max,
+                                       bed_temp, density, cost, diameter, flow_ratio
+                                FROM bambu_filament_profiles
+                                WHERE filament_id = %s
+                            """, (filament_id,))
+                            result = db_cur.fetchone()
+                            db_cur.close()
+                            
+                            if result:
+                                return {
+                                    'db_name': result[0],
+                                    'db_material_type': result[1],
+                                    'db_vendor': result[2],
+                                    'db_temp_min': result[3],
+                                    'db_temp_max': result[4],
+                                    'db_bed_temp': result[5],
+                                    'db_density': result[6],
+                                    'db_cost': result[7],
+                                    'db_diameter': result[8],
+                                    'db_flow_ratio': result[9]
+                                }
+                        except Exception as e:
+                            console.print(f"  [dim]Database lookup error for {filament_id}: {e}[/]")
+                        return None
+                    
+                    try:
+                        # Get currently active filament - check if vt_tray data exists first
+                        vt_tray_data = client.mqtt_client._PrinterMQTTClient__get_print("vt_tray")
+                        if vt_tray_data is not None and isinstance(vt_tray_data, dict):
+                            vt_tray = client.vt_tray()
+                            if vt_tray:
+                                # Extract filament information with proper validation and type conversion
+                                tray_type = getattr(vt_tray, 'tray_type', 'N/A')
+                                tray_color = getattr(vt_tray, 'tray_color', 'N/A')
+                                tray_weight = getattr(vt_tray, 'tray_weight', 'N/A')
+                                tray_brand = getattr(vt_tray, 'tray_sub_brands', 'N/A')
+                                tray_info_idx = getattr(vt_tray, 'tray_info_idx', 'N/A')
+                                tray_diameter = getattr(vt_tray, 'tray_diameter', 'N/A')
+                                bed_temp = getattr(vt_tray, 'bed_temp', 'N/A')
+                                
+                                # Convert temperature values to integers, handling string inputs
+                                temp_min = 0
+                                temp_max = 0
+                                bed_temp_int = 0
+                                try:
+                                    temp_min_raw = getattr(vt_tray, 'nozzle_temp_min', 0)
+                                    temp_max_raw = getattr(vt_tray, 'nozzle_temp_max', 0)
+                                    temp_min = int(temp_min_raw) if temp_min_raw not in ['N/A', '', None] else 0
+                                    temp_max = int(temp_max_raw) if temp_max_raw not in ['N/A', '', None] else 0
+                                    bed_temp_int = int(bed_temp) if bed_temp not in ['N/A', '', None] else 0
+                                except (ValueError, TypeError):
+                                    temp_min = temp_max = bed_temp_int = 0
+                                
+                                # Look up filament information from database
+                                db_filament_info = get_filament_from_database(tray_info_idx)
+                                
+                                # Try to get specific filament type from the Filament enum (fallback)
+                                specific_filament_name = None
+                                try:
+                                    if tray_info_idx and tray_info_idx != 'N/A':
+                                        # Try to find matching filament by tray_info_idx
+                                        from bambulabs_api.filament_info import Filament
+                                        for filament_enum in Filament:
+                                            if filament_enum.tray_info_idx == tray_info_idx:
+                                                specific_filament_name = filament_enum.name
+                                                break
+                                except Exception:
+                                    pass  # If we can't match, just use the basic type
+                                
+                                # Only create filament info if we have meaningful data
+                                if (tray_type and tray_type not in ['N/A', ''] and
+                                    (temp_min > 0 or temp_max > 0 or db_filament_info or
+                                     (tray_color and tray_color not in ['N/A', '', '00000000']))):
+                                    current_filament_info = {
+                                        'type': tray_type,
+                                        'specific_type': specific_filament_name,
+                                        'color': tray_color,
+                                        'temp_min': temp_min,
+                                        'temp_max': temp_max,
+                                        'bed_temp': bed_temp_int,
+                                        'weight': tray_weight,
+                                        'brand': tray_brand,
+                                        'diameter': tray_diameter,
+                                        'tray_info_idx': tray_info_idx,
+                                        'db_info': db_filament_info  # Add database info
+                                    }
+                    except Exception as filament_e:
+                        # Only show warning if it's not just missing vt_tray data
+                        if "NoneType" not in str(filament_e):
+                            console.print(f"  [yellow]Warning:[/yellow] Could not retrieve current filament info: {filament_e}")
+                    
+                    try:
+                        # Get AMS hub information
+                        ams_hub = client.ams_hub()
+                        for ams_id in range(4):  # Check up to 4 AMS units
+                            try:
+                                ams = ams_hub[ams_id]
+                                ams_info = {
+                                    'ams_id': ams_id,
+                                    'humidity': ams.humidity,
+                                    'temperature': ams.temperature,
+                                    'trays': []
+                                }
+                                
+                                # Get filament trays in this AMS
+                                for tray_id in range(4):  # Check up to 4 trays per AMS
+                                    tray = ams.get_filament_tray(tray_id)
+                                    if tray:
+                                        tray_info_idx = getattr(tray, 'tray_info_idx', 'N/A')
+                                        
+                                        # Look up filament information from database
+                                        db_filament_info = get_filament_from_database(tray_info_idx)
+                                        
+                                        # Try to get specific filament type from enum (fallback)
+                                        specific_filament_name = None
+                                        try:
+                                            if tray_info_idx and tray_info_idx != 'N/A':
+                                                from bambulabs_api.filament_info import Filament
+                                                for filament_enum in Filament:
+                                                    if filament_enum.tray_info_idx == tray_info_idx:
+                                                        specific_filament_name = filament_enum.name
+                                                        break
+                                        except Exception:
+                                            pass
+                                        
+                                        tray_info = {
+                                            'tray_id': tray_id,
+                                            'type': tray.tray_type,
+                                            'specific_type': specific_filament_name,
+                                            'color': tray.tray_color,
+                                            'temp_min': tray.nozzle_temp_min,
+                                            'temp_max': tray.nozzle_temp_max,
+                                            'weight': tray.tray_weight,
+                                            'brand': tray.tray_sub_brands,
+                                            'uuid': tray.tray_uuid,
+                                            'diameter': getattr(tray, 'tray_diameter', 'N/A'),
+                                            'bed_temp': getattr(tray, 'bed_temp', 'N/A'),
+                                            'tray_info_idx': tray_info_idx,
+                                            'db_info': db_filament_info  # Add database info
+                                        }
+                                        ams_info['trays'].append(tray_info)
+                                
+                                if ams_info['trays']:  # Only add AMS if it has trays
+                                    ams_filament_info.append(ams_info)
+                                    
+                            except KeyError:
+                                # AMS unit doesn't exist, continue to next
+                                continue
+                    except Exception as ams_e:
+                        console.print(f"  [yellow]Warning:[/yellow] Could not retrieve AMS info: {ams_e}")
 
                     # --- Format Status with Color ---
                     status_color = "white"
@@ -503,7 +805,7 @@ if __name__ == '__main__':
                     if isinstance(percentage, (int, float)) and 0 <= percentage <= 100:
                         bar_length = 20 # Length of the progress bar
                         filled_length = int(bar_length * percentage / 100)
-                        bar = '█' * filled_length + '-' * (bar_length - filled_length)
+                        bar = '#' * filled_length + '-' * (bar_length - filled_length)
                         progress_bar = f"[cyan]|{bar}| {percentage:.1f}%[/]"
                     elif percentage == "Unknown":
                         progress_bar = "[dim]Unknown[/]"
@@ -532,18 +834,160 @@ if __name__ == '__main__':
                     table.add_row("Progress", progress_bar)
                     table.add_row("File", f"[cyan]{gcode_file}[/]")
                     table.add_row("Layer", f"{layer_num}/{total_layer_num}")
-                    table.add_row("Bed Temp", f"{bed_temp}°C")
-                    table.add_row("Nozzle Temp", f"{nozzle_temp}°C")
+                    table.add_row("Bed Temp", f"{bed_temp} C")
+                    table.add_row("Nozzle Temp", f"{nozzle_temp} C")
                     table.add_row("Remaining", remaining_str)
                     table.add_row("Est. Finish", finish_time_str)
+                    
+                    # --- Add Current Filament Information ---
+                    if current_filament_info:
+                        db_info = current_filament_info.get('db_info')
+                        
+                        # Build filament display - prioritize database info
+                        if db_info and db_info.get('db_name'):
+                            # Use database name (more descriptive)
+                            filament_display = f"[magenta]{db_info['db_name']}[/]"
+                        elif current_filament_info.get('specific_type'):
+                            # Fallback to enum name
+                            filament_display = f"[magenta]{current_filament_info['specific_type']}[/]"
+                        else:
+                            # Final fallback to basic type
+                            filament_display = f"[magenta]{current_filament_info['type']}[/]"
+                        
+                        # Add color if available
+                        if current_filament_info['color'] and current_filament_info['color'] not in ['N/A', '', '00000000']:
+                            filament_display += f" - [yellow]{current_filament_info['color']}[/]"
+                        
+                        # Add vendor from database if available
+                        if db_info and db_info.get('db_vendor'):
+                            filament_display += f" ([blue]{db_info['db_vendor']}[/])"
+                        elif (current_filament_info['brand'] and
+                              current_filament_info['brand'] not in ['N/A', ''] and
+                              not current_filament_info.get('specific_type')):
+                            filament_display += f" ({current_filament_info['brand']})"
+                        
+                        table.add_row("Active Filament", filament_display)
+                        
+                        # Add nozzle temperature range - prioritize database values
+                        temp_min = current_filament_info.get('temp_min', 0)
+                        temp_max = current_filament_info.get('temp_max', 0)
+                        
+                        if db_info and db_info.get('db_temp_min') and db_info.get('db_temp_max'):
+                            # Use database temperatures (more accurate)
+                            db_temp_min = db_info['db_temp_min']
+                            db_temp_max = db_info['db_temp_max']
+                            if db_temp_min != db_temp_max:
+                                temp_range = f"{db_temp_min}-{db_temp_max}°C [green](DB)[/]"
+                            else:
+                                temp_range = f"{db_temp_min}°C [green](DB)[/]"
+                            table.add_row("Nozzle Temp", temp_range)
+                        elif temp_min > 0 and temp_max > 0:
+                            if temp_min != temp_max:
+                                temp_range = f"{temp_min}-{temp_max}°C"
+                            else:
+                                temp_range = f"{temp_min}°C"
+                            table.add_row("Nozzle Temp", temp_range)
+                        elif temp_min > 0:
+                            table.add_row("Nozzle Temp", f"{temp_min}°C")
+                        elif temp_max > 0:
+                            table.add_row("Nozzle Temp", f"{temp_max}°C")
+                        
+                        # Add bed temperature - prioritize database values
+                        bed_temp = current_filament_info.get('bed_temp', 0)
+                        if db_info and db_info.get('db_bed_temp'):
+                            table.add_row("Bed Temp Rec", f"{db_info['db_bed_temp']}°C [green](DB)[/]")
+                        elif bed_temp > 0:
+                            table.add_row("Bed Temp Rec", f"{bed_temp}°C")
+                        
+                        # Add diameter - prioritize database values
+                        if db_info and db_info.get('db_diameter'):
+                            table.add_row("Diameter", f"{db_info['db_diameter']:.2f}mm [green](DB)[/]")
+                        else:
+                            diameter = current_filament_info.get('diameter', 'N/A')
+                            if diameter and diameter not in ['N/A', '']:
+                                table.add_row("Diameter", f"{diameter}mm")
+                        
+                        # Add additional database information
+                        if db_info:
+                            if db_info.get('db_cost'):
+                                table.add_row("Cost/kg", f"${db_info['db_cost']:.2f} [green](DB)[/]")
+                            if db_info.get('db_density'):
+                                table.add_row("Density", f"{db_info['db_density']:.2f} g/cm³ [green](DB)[/]")
+                        
+                        # Add weight if available
+                        weight = current_filament_info.get('weight', 'N/A')
+                        if weight and weight not in ['N/A', '', '0']:
+                            table.add_row("Weight", f"{weight}g")
+                    else:
+                        table.add_row("Active Filament", "[dim]N/A[/]")
 
                     console.print(table)
+                    
+                    # --- Display AMS Information ---
+                    if ams_filament_info:
+                        console.print(f"  [bold blue]AMS Information:[/]")
+                        for ams in ams_filament_info:
+                            console.print(f"    [blue]AMS {ams['ams_id']}:[/] {ams['humidity']}% humidity, {ams['temperature']}°C")
+                            for tray in ams['trays']:
+                                db_info = tray.get('db_info')
+                                
+                                # Build tray display - prioritize database info
+                                if db_info and db_info.get('db_name'):
+                                    # Use database name (more descriptive)
+                                    tray_display = f"[magenta]{db_info['db_name']}[/]"
+                                elif tray.get('specific_type'):
+                                    tray_display = f"[magenta]{tray['specific_type']}[/]"
+                                else:
+                                    tray_display = f"[magenta]{tray['type']}[/]"
+                                
+                                # Add color
+                                if tray['color'] and tray['color'] not in ['N/A', '', '00000000']:
+                                    tray_display += f" - [yellow]{tray['color']}[/]"
+                                
+                                # Add vendor from database if available
+                                if db_info and db_info.get('db_vendor'):
+                                    tray_display += f" ([blue]{db_info['db_vendor']}[/])"
+                                elif (tray['brand'] and tray['brand'] not in ['N/A', ''] and
+                                      not tray.get('specific_type')):
+                                    tray_display += f" ({tray['brand']})"
+                                
+                                # Add weight
+                                if tray['weight'] and tray['weight'] not in ['N/A', '', '0']:
+                                    tray_display += f" [{tray['weight']}g]"
+                                
+                                # Add temperature info - prioritize database values
+                                temp_info = ""
+                                if db_info and db_info.get('db_temp_min') and db_info.get('db_temp_max'):
+                                    # Use database temperatures (more accurate)
+                                    db_temp_min = db_info['db_temp_min']
+                                    db_temp_max = db_info['db_temp_max']
+                                    if db_temp_min != db_temp_max:
+                                        temp_info = f" ([green]{db_temp_min}-{db_temp_max}°C DB[/])"
+                                    else:
+                                        temp_info = f" ([green]{db_temp_min}°C DB[/])"
+                                elif (isinstance(tray.get('temp_min'), int) and isinstance(tray.get('temp_max'), int) and
+                                      tray['temp_min'] > 0 and tray['temp_max'] > 0):
+                                    if tray['temp_min'] != tray['temp_max']:
+                                        temp_info = f" ({tray['temp_min']}-{tray['temp_max']}°C)"
+                                    else:
+                                        temp_info = f" ({tray['temp_min']}°C)"
+                                
+                                # Add cost info if available from database
+                                cost_info = ""
+                                if db_info and db_info.get('db_cost'):
+                                    cost_info = f" [dim]${db_info['db_cost']:.2f}/kg[/]"
+                                
+                                console.print(f"      Tray {tray['tray_id']}: {tray_display}{temp_info}{cost_info}")
 
 
                     # --- Update Printers Table (Every Cycle) ---
                     # Pass percentage to the update function
                     update_printer_table(printer_id, status, remaining_time_min, gcode_file if gcode_file != "[dim]N/A[/]" else None, percentage)
                     # --- End Update Printers Table ---
+
+                    # --- Update Filament Information (Every Cycle) ---
+                    update_filament_table(printer_id, current_filament_info, ams_filament_info)
+                    # --- End Update Filament Information ---
 
                     # --- Log Status Periodically (Every 5 Mins) ---
                     log_status_periodically(printer_info, status)
