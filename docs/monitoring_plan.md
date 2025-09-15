@@ -42,7 +42,7 @@ The required columns identified are:
     *   **Install Dependency:** `pip install -r requirements.txt`.
     *   **Set Environment Variables:**
         ```bash
-        export DB_HOST=192.168.7.23
+        export DB_HOST=192.168.7.236
         export DB_PORT=5432
         export DB_NAME=familyRewardDb
         export DB_USER=postgres

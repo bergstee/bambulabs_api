@@ -905,7 +905,7 @@ class PrinterMQTTClient:
                     "ams_id": ams_id,
                     "tray_id": tray_id,
                     "tray_info_idx": filament_material.tray_info_idx,
-                    "tray_color": f"{colour.upper()}FF",
+                    "tray_color": f"{colour.upper()}",
                     "nozzle_temp_min": filament_material.nozzle_temp_min,
                     "nozzle_temp_max": filament_material.nozzle_temp_max,
                     "tray_type": filament_material.tray_type

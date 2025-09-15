@@ -33,7 +33,12 @@ def display_filament_info(printer_client, printer_name):
             active_table.add_column("Value")
             
             active_table.add_row("Type", f"[magenta]{vt_tray.tray_type}[/]")
-            active_table.add_row("Color", f"[yellow]{vt_tray.tray_color}[/]" if vt_tray.tray_color != 'N/A' else "[dim]N/A[/]")
+            # Remove FF suffix from color if present
+            display_color = vt_tray.tray_color
+            if (display_color and display_color not in ['N/A', ''] and
+                len(display_color) == 8 and display_color.endswith('FF')):
+                display_color = display_color[:-2]
+            active_table.add_row("Color", f"[yellow]{display_color}[/]" if display_color != 'N/A' else "[dim]N/A[/]")
             active_table.add_row("Brand", vt_tray.tray_sub_brands if vt_tray.tray_sub_brands != 'N/A' else "[dim]N/A[/]")
             active_table.add_row("Weight", f"{vt_tray.tray_weight}g" if vt_tray.tray_weight != 'N/A' else "[dim]N/A[/]")
             active_table.add_row("Temp Range", f"{vt_tray.nozzle_temp_min}-{vt_tray.nozzle_temp_max}°C")
@@ -77,7 +82,12 @@ def display_filament_info(printer_client, printer_name):
                         
                         tray_table.add_row("Tray", f"[cyan]{tray_id}[/]")
                         tray_table.add_row("Type", f"[magenta]{tray.tray_type}[/]")
-                        tray_table.add_row("Color", f"[yellow]{tray.tray_color}[/]" if tray.tray_color != 'N/A' else "[dim]N/A[/]")
+                        # Remove FF suffix from color if present
+                        tray_display_color = tray.tray_color
+                        if (tray_display_color and tray_display_color not in ['N/A', ''] and
+                            len(tray_display_color) == 8 and tray_display_color.endswith('FF')):
+                            tray_display_color = tray_display_color[:-2]
+                        tray_table.add_row("Color", f"[yellow]{tray_display_color}[/]" if tray_display_color != 'N/A' else "[dim]N/A[/]")
                         tray_table.add_row("Brand", tray.tray_sub_brands if tray.tray_sub_brands != 'N/A' else "[dim]N/A[/]")
                         tray_table.add_row("Weight", f"{tray.tray_weight}g" if tray.tray_weight != 'N/A' else "[dim]N/A[/]")
                         tray_table.add_row("Temp Range", f"{tray.nozzle_temp_min}-{tray.nozzle_temp_max}°C")

@@ -218,21 +218,26 @@ if __name__ == '__main__':
                     result = filament_cur.fetchone()
                     ams_count = result[0] if result else 0
                     
-                    # Check if we have a complete dataset or just partial updates
-                    # P1 series only sends changed values, so we need to be careful not to overwrite existing data
-                    has_complete_ams_data = False
-                    if p_ams_filament_info and ams_count > 0:
-                        # Check if we have data for all expected AMS units
-                        ams_ids_present = set(ams['ams_id'] for ams in p_ams_filament_info)
-                        expected_ams_ids = set(range(ams_count))
-                        has_complete_ams_data = ams_ids_present == expected_ams_ids
-                        
-                        # Also check if each AMS has a reasonable number of trays
-                        if has_complete_ams_data:
-                            for ams in p_ams_filament_info:
-                                if len(ams.get('trays', [])) == 0:
-                                    has_complete_ams_data = False
-                                    break
+                    # Check if we have any filament data to process
+                    # For P1 series, don't delete existing data if no filament info is received
+                    has_filament_data = False
+                    if ams_count == 0:
+                        # For non-AMS printers, check if we have current filament info
+                        has_filament_data = p_current_filament_info is not None
+                    else:
+                        # For AMS printers, check if we have AMS filament info
+                        has_filament_data = p_ams_filament_info is not None and len(p_ams_filament_info) > 0
+                    
+                    # Only proceed if we have filament data to process
+                    if not has_filament_data:
+                        # console.print(f"  No filament data received for printer ID {p_id}, skipping update") # Optional
+                        return
+                    
+                    # Delete existing records and recreate to ensure clean state
+                    # This prevents duplicate records and ensures we only have current data
+                    filament_cur.execute("""
+                        DELETE FROM printer_filaments WHERE printer_id = %s
+                    """, (p_id,))
                     
                     # Store filament records based on AMS count
                     if ams_count == 0:
@@ -257,7 +262,7 @@ if __name__ == '__main__':
                                 'tray_uuid': p_current_filament_info.get('tray_uuid')
                             }
                             
-                            # Use UPSERT for external spool filament (ams_id and tray_id are NULL)
+                            # Insert external spool filament (ams_id and tray_id are NULL)
                             filament_cur.execute("""
                                 INSERT INTO printer_filaments (
                                     printer_id, ams_id, tray_id, filament_id, filament_name, filament_type,
@@ -265,23 +270,7 @@ if __name__ == '__main__':
                                     weight, cost, density, diameter, tray_uuid, is_active, detected_at, updated_at
                                 ) VALUES (
                                     %s, NULL, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, %s, %s
-                                ) ON CONFLICT (printer_id, ams_id, tray_id)
-                                DO UPDATE SET
-                                    filament_id = EXCLUDED.filament_id,
-                                    filament_name = EXCLUDED.filament_name,
-                                    filament_type = EXCLUDED.filament_type,
-                                    filament_color = EXCLUDED.filament_color,
-                                    filament_vendor = EXCLUDED.filament_vendor,
-                                    temp_min = EXCLUDED.temp_min,
-                                    temp_max = EXCLUDED.temp_max,
-                                    bed_temp = EXCLUDED.bed_temp,
-                                    weight = EXCLUDED.weight,
-                                    cost = EXCLUDED.cost,
-                                    density = EXCLUDED.density,
-                                    diameter = EXCLUDED.diameter,
-                                    tray_uuid = EXCLUDED.tray_uuid,
-                                    is_active = TRUE,
-                                    updated_at = EXCLUDED.updated_at
+                                )
                             """, (
                                 p_id, filament_data['filament_id'], filament_data['filament_name'],
                                 filament_data['filament_type'], filament_data['filament_color'],
@@ -293,169 +282,83 @@ if __name__ == '__main__':
                             ))
                     
                     else:
-                        # Printer has AMS units - handle based on whether we have complete data
-                        if has_complete_ams_data:
-                            # We have complete AMS data - safe to do full refresh
-                            filament_cur.execute("""
-                                DELETE FROM printer_filaments WHERE printer_id = %s
-                            """, (p_id,))
-                            
-                            # Ensure we have exactly 4 records per AMS unit (ams_count * 4 total records)
-                            for ams_id in range(ams_count):
-                                # Create a map of existing tray data for this AMS
-                                existing_trays = {}
+                        # Printer has AMS units - store exactly 4 records per AMS unit
+                        for ams_id in range(ams_count):
+                            # Create a map of existing tray data for this AMS
+                            existing_trays = {}
+                            if p_ams_filament_info:
                                 for ams in p_ams_filament_info:
                                     if ams['ams_id'] == ams_id:
                                         for tray in ams['trays']:
                                             existing_trays[tray['tray_id']] = tray
                                         break
-                                
-                                # Insert records for all 4 tray positions (0-3)
-                                for tray_id in range(4):
-                                    if tray_id in existing_trays:
-                                        # Use actual tray data
-                                        tray = existing_trays[tray_id]
-                                        db_info = tray.get('db_info')
-                                        
-                                        # Prepare tray data
-                                        tray_data = {
-                                            'filament_id': tray.get('tray_info_idx'),
-                                            'filament_name': db_info.get('db_name') if db_info else None,
-                                            'filament_type': tray.get('type'),
-                                            'filament_color': tray.get('color'),
-                                            'filament_vendor': db_info.get('db_vendor') if db_info else tray.get('brand'),
-                                            'temp_min': db_info.get('db_temp_min') if db_info else tray.get('temp_min'),
-                                            'temp_max': db_info.get('db_temp_max') if db_info else tray.get('temp_max'),
-                                            'bed_temp': db_info.get('db_bed_temp') if db_info else tray.get('bed_temp'),
-                                            'weight': tray.get('weight'),
-                                            'cost': db_info.get('db_cost') if db_info else None,
-                                            'density': db_info.get('db_density') if db_info else None,
-                                            'diameter': db_info.get('db_diameter') if db_info else tray.get('diameter'),
-                                            'tray_uuid': tray.get('uuid')
-                                        }
-                                        
-                                        # Determine if this is the currently active filament
-                                        is_active = (p_current_filament_info and
-                                                    p_current_filament_info.get('tray_info_idx') == tray_data['filament_id'])
-                                    else:
-                                        # Create NULL record for missing/empty tray
-                                        tray_data = {
-                                            'filament_id': None,
-                                            'filament_name': None,
-                                            'filament_type': None,
-                                            'filament_color': None,
-                                            'filament_vendor': None,
-                                            'temp_min': None,
-                                            'temp_max': None,
-                                            'bed_temp': None,
-                                            'weight': None,
-                                            'cost': None,
-                                            'density': None,
-                                            'diameter': None,
-                                            'tray_uuid': None
-                                        }
-                                        is_active = False
-                                    
-                                    # Insert AMS tray filament (actual data or NULL placeholder)
-                                    filament_cur.execute("""
-                                        INSERT INTO printer_filaments (
-                                            printer_id, ams_id, tray_id, filament_id, filament_name, filament_type,
-                                            filament_color, filament_vendor, temp_min, temp_max, bed_temp,
-                                            weight, cost, density, diameter, tray_uuid, is_active, detected_at, updated_at
-                                        ) VALUES (
-                                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                                        )
-                                    """, (
-                                        p_id, ams_id, tray_id, tray_data['filament_id'],
-                                        tray_data['filament_name'], tray_data['filament_type'],
-                                        tray_data['filament_color'], tray_data['filament_vendor'],
-                                        tray_data['temp_min'], tray_data['temp_max'], tray_data['bed_temp'],
-                                        tray_data['weight'], tray_data['cost'], tray_data['density'],
-                                        tray_data['diameter'], tray_data['tray_uuid'], is_active, now, now
-                                    ))
-                        else:
-                            # We have partial AMS data - use UPSERT to preserve existing records
-                            if p_ams_filament_info:
-                                for ams in p_ams_filament_info:
-                                    ams_id = ams['ams_id']
-                                    for tray in ams['trays']:
-                                        db_info = tray.get('db_info')
-                                        
-                                        # Prepare tray data
-                                        tray_data = {
-                                            'filament_id': tray.get('tray_info_idx'),
-                                            'filament_name': db_info.get('db_name') if db_info else None,
-                                            'filament_type': tray.get('type'),
-                                            'filament_color': tray.get('color'),
-                                            'filament_vendor': db_info.get('db_vendor') if db_info else tray.get('brand'),
-                                            'temp_min': db_info.get('db_temp_min') if db_info else tray.get('temp_min'),
-                                            'temp_max': db_info.get('db_temp_max') if db_info else tray.get('temp_max'),
-                                            'bed_temp': db_info.get('db_bed_temp') if db_info else tray.get('bed_temp'),
-                                            'weight': tray.get('weight'),
-                                            'cost': db_info.get('db_cost') if db_info else None,
-                                            'density': db_info.get('db_density') if db_info else None,
-                                            'diameter': db_info.get('db_diameter') if db_info else tray.get('diameter'),
-                                            'tray_uuid': tray.get('uuid')
-                                        }
-                                        
-                                        # Determine if this is the currently active filament
-                                        is_active = (p_current_filament_info and
-                                                    p_current_filament_info.get('tray_info_idx') == tray_data['filament_id'])
-                                        
-                                        # Use UPSERT for AMS tray filament to preserve existing data
-                                        filament_cur.execute("""
-                                            INSERT INTO printer_filaments (
-                                                printer_id, ams_id, tray_id, filament_id, filament_name, filament_type,
-                                                filament_color, filament_vendor, temp_min, temp_max, bed_temp,
-                                                weight, cost, density, diameter, tray_uuid, is_active, detected_at, updated_at
-                                            ) VALUES (
-                                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                                            ) ON CONFLICT (printer_id, ams_id, tray_id)
-                                            DO UPDATE SET
-                                                filament_id = EXCLUDED.filament_id,
-                                                filament_name = EXCLUDED.filament_name,
-                                                filament_type = EXCLUDED.filament_type,
-                                                filament_color = EXCLUDED.filament_color,
-                                                filament_vendor = EXCLUDED.filament_vendor,
-                                                temp_min = EXCLUDED.temp_min,
-                                                temp_max = EXCLUDED.temp_max,
-                                                bed_temp = EXCLUDED.bed_temp,
-                                                weight = EXCLUDED.weight,
-                                                cost = EXCLUDED.cost,
-                                                density = EXCLUDED.density,
-                                                diameter = EXCLUDED.diameter,
-                                                tray_uuid = EXCLUDED.tray_uuid,
-                                                is_active = EXCLUDED.is_active,
-                                                updated_at = EXCLUDED.updated_at
-                                        """, (
-                                            p_id, ams_id, tray['tray_id'], tray_data['filament_id'],
-                                            tray_data['filament_name'], tray_data['filament_type'],
-                                            tray_data['filament_color'], tray_data['filament_vendor'],
-                                            tray_data['temp_min'], tray_data['temp_max'], tray_data['bed_temp'],
-                                            tray_data['weight'], tray_data['cost'], tray_data['density'],
-                                            tray_data['diameter'], tray_data['tray_uuid'], is_active, now, now
-                                        ))
                             
-                            # Update is_active status for all records to ensure only current active filament is marked
-                            if p_current_filament_info:
-                                current_filament_id = p_current_filament_info.get('tray_info_idx')
-                                if current_filament_id:
-                                    # Set all to inactive first
-                                    filament_cur.execute("""
-                                        UPDATE printer_filaments
-                                        SET is_active = FALSE, updated_at = %s
-                                        WHERE printer_id = %s
-                                    """, (now, p_id))
+                            # Insert records for all 4 tray positions (0-3)
+                            for tray_id in range(4):
+                                if tray_id in existing_trays:
+                                    # Use actual tray data
+                                    tray = existing_trays[tray_id]
+                                    db_info = tray.get('db_info')
                                     
-                                    # Set the current active filament
-                                    filament_cur.execute("""
-                                        UPDATE printer_filaments
-                                        SET is_active = TRUE, updated_at = %s
-                                        WHERE printer_id = %s AND filament_id = %s
-                                    """, (now, p_id, current_filament_id))
+                                    # Prepare tray data
+                                    tray_data = {
+                                        'filament_id': tray.get('tray_info_idx'),
+                                        'filament_name': db_info.get('db_name') if db_info else None,
+                                        'filament_type': tray.get('type'),
+                                        'filament_color': tray.get('color')[:-2] if (tray.get('color') and len(tray.get('color')) == 8 and tray.get('color').endswith('FF')) else tray.get('color'),
+                                        'filament_vendor': db_info.get('db_vendor') if db_info else tray.get('brand'),
+                                        'temp_min': db_info.get('db_temp_min') if db_info else tray.get('temp_min'),
+                                        'temp_max': db_info.get('db_temp_max') if db_info else tray.get('temp_max'),
+                                        'bed_temp': db_info.get('db_bed_temp') if db_info else tray.get('bed_temp'),
+                                        'weight': tray.get('weight'),
+                                        'cost': db_info.get('db_cost') if db_info else None,
+                                        'density': db_info.get('db_density') if db_info else None,
+                                        'diameter': db_info.get('db_diameter') if db_info else tray.get('diameter'),
+                                        'tray_uuid': tray.get('uuid')
+                                    }
+                                    
+                                    # Determine if this is the currently active filament
+                                    is_active = (p_current_filament_info and
+                                                p_current_filament_info.get('tray_info_idx') == tray_data['filament_id'])
+                                else:
+                                    # Create NULL record for missing/empty tray
+                                    tray_data = {
+                                        'filament_id': None,
+                                        'filament_name': None,
+                                        'filament_type': None,
+                                        'filament_color': None,
+                                        'filament_vendor': None,
+                                        'temp_min': None,
+                                        'temp_max': None,
+                                        'bed_temp': None,
+                                        'weight': None,
+                                        'cost': None,
+                                        'density': None,
+                                        'diameter': None,
+                                        'tray_uuid': None
+                                    }
+                                    is_active = False
+                                
+                                # Insert AMS tray filament (actual data or NULL placeholder)
+                                filament_cur.execute("""
+                                    INSERT INTO printer_filaments (
+                                        printer_id, ams_id, tray_id, filament_id, filament_name, filament_type,
+                                        filament_color, filament_vendor, temp_min, temp_max, bed_temp,
+                                        weight, cost, density, diameter, tray_uuid, is_active, detected_at, updated_at
+                                    ) VALUES (
+                                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                    )
+                                """, (
+                                    p_id, ams_id, tray_id, tray_data['filament_id'],
+                                    tray_data['filament_name'], tray_data['filament_type'],
+                                    tray_data['filament_color'], tray_data['filament_vendor'],
+                                    tray_data['temp_min'], tray_data['temp_max'], tray_data['bed_temp'],
+                                    tray_data['weight'], tray_data['cost'], tray_data['density'],
+                                    tray_data['diameter'], tray_data['tray_uuid'], is_active, now, now
+                                ))
                     
                     db_conn.commit()
-                    # console.print(f"  Filament information updated for printer ID {p_id} (AMS count: {ams_count}, Complete data: {has_complete_ams_data if ams_count > 0 else 'N/A'})") # Optional
+                    # console.print(f"  Filament information updated for printer ID {p_id} (AMS count: {ams_count})") # Optional
                     
                 except Exception as filament_update_e:
                     error_msg = f"Error updating filament information for printer ID {p_id}"
@@ -797,7 +700,13 @@ if __name__ == '__main__':
                             if vt_tray:
                                 # Extract filament information with proper validation and type conversion
                                 tray_type = getattr(vt_tray, 'tray_type', 'N/A')
-                                tray_color = getattr(vt_tray, 'tray_color', 'N/A')
+                                tray_color_raw = getattr(vt_tray, 'tray_color', 'N/A')
+                                # Remove FF suffix if present (8-char hex -> 6-char hex)
+                                if (tray_color_raw and tray_color_raw not in ['N/A', ''] and
+                                    len(tray_color_raw) == 8 and tray_color_raw.endswith('FF')):
+                                    tray_color = tray_color_raw[:-2]
+                                else:
+                                    tray_color = tray_color_raw
                                 tray_weight = getattr(vt_tray, 'tray_weight', 'N/A')
                                 tray_brand = getattr(vt_tray, 'tray_sub_brands', 'N/A')
                                 tray_info_idx = getattr(vt_tray, 'tray_info_idx', 'N/A')
@@ -836,7 +745,7 @@ if __name__ == '__main__':
                                 # Only create filament info if we have meaningful data
                                 if (tray_type and tray_type not in ['N/A', ''] and
                                     (temp_min > 0 or temp_max > 0 or db_filament_info or
-                                     (tray_color and tray_color not in ['N/A', '', '00000000']))):
+                                     (tray_color and tray_color not in ['N/A', '', '000000', '00000000']))):
                                     current_filament_info = {
                                         'type': tray_type,
                                         'specific_type': specific_filament_name,
@@ -893,7 +802,7 @@ if __name__ == '__main__':
                                             'tray_id': tray_id,
                                             'type': tray.tray_type,
                                             'specific_type': specific_filament_name,
-                                            'color': tray.tray_color,
+                                            'color': tray.tray_color[:-2] if (tray.tray_color and len(tray.tray_color) == 8 and tray.tray_color.endswith('FF')) else tray.tray_color,
                                             'temp_min': tray.nozzle_temp_min,
                                             'temp_max': tray.nozzle_temp_max,
                                             'weight': tray.tray_weight,
@@ -978,7 +887,7 @@ if __name__ == '__main__':
                             filament_display = f"[magenta]{current_filament_info['type']}[/]"
                         
                         # Add color if available
-                        if current_filament_info['color'] and current_filament_info['color'] not in ['N/A', '', '00000000']:
+                        if current_filament_info['color'] and current_filament_info['color'] not in ['N/A', '', '000000', '00000000']:
                             filament_display += f" - [yellow]{current_filament_info['color']}[/]"
                         
                         # Add vendor from database if available
@@ -1064,7 +973,7 @@ if __name__ == '__main__':
                                     tray_display = f"[magenta]{tray['type']}[/]"
                                 
                                 # Add color
-                                if tray['color'] and tray['color'] not in ['N/A', '', '00000000']:
+                                if tray['color'] and tray['color'] not in ['N/A', '', '000000', '00000000']:
                                     tray_display += f" - [yellow]{tray['color']}[/]"
                                 
                                 # Add vendor from database if available
