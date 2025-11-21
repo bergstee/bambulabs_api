@@ -398,9 +398,70 @@ if __name__ == '__main__':
                         if log_cur: log_cur.close()
             # --- End Function to Log Status Periodically ---
 
+            # --- Function to Log Job Filament Information ---
+            def log_job_filament(job_history_id, p_id, current_filament_info):
+                """Store filament information used for this print job"""
+                if not current_filament_info or not job_history_id:
+                    return
+
+                filament_cur = None
+                try:
+                    filament_cur = db_conn.cursor()
+
+                    db_info = current_filament_info.get('db_info', {}) or {}
+
+                    insert_sql = """
+                        INSERT INTO printer_job_filaments (
+                            job_history_id, printer_id, filament_id, tray_uuid,
+                            filament_name, filament_type, filament_color,
+                            filament_vendor, temp_min, temp_max, bed_temp,
+                            weight, cost, density, diameter
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (job_history_id) DO NOTHING;
+                    """
+
+                    filament_cur.execute(insert_sql, (
+                        job_history_id, p_id,
+                        current_filament_info.get('tray_info_idx'),
+                        current_filament_info.get('tray_uuid'),
+                        db_info.get('db_name') if db_info else None,
+                        current_filament_info.get('type'),
+                        current_filament_info.get('color'),
+                        db_info.get('db_vendor') if db_info else current_filament_info.get('brand'),
+                        current_filament_info.get('temp_min'),
+                        current_filament_info.get('temp_max'),
+                        current_filament_info.get('bed_temp'),
+                        current_filament_info.get('weight'),
+                        db_info.get('db_cost') if db_info else None,
+                        db_info.get('db_density') if db_info else None,
+                        db_info.get('db_diameter') if db_info else current_filament_info.get('diameter')
+                    ))
+
+                    db_conn.commit()
+
+                    # Build display string for confirmation
+                    filament_display = current_filament_info.get('type', 'Unknown')
+                    if current_filament_info.get('color'):
+                        filament_display += f" - {current_filament_info.get('color')}"
+                    if db_info and db_info.get('db_name'):
+                        filament_display += f" ({db_info.get('db_name')})"
+
+                    console.print(f"  [green]Filament data captured:[/green] {filament_display}")
+
+                except Exception as e:
+                    error_msg = f"Error logging filament for job {job_history_id}"
+                    console.print(f"  [red]{error_msg}:[/red] {e}")
+                    logging.exception(error_msg)
+                    if db_conn: db_conn.rollback()
+                finally:
+                    if filament_cur: filament_cur.close()
+            # --- End Function to Log Job Filament Information ---
+
             # --- Job History Logging Function ---
             # Added remaining_time_min and percentage parameters
-            def log_job_event(p_id, current_status, current_filename, prev_status, prev_filename, remaining_time_min, percentage):
+            def log_job_event(p_id, current_status, current_filename, prev_status, prev_filename, remaining_time_min, percentage, current_filament_info):
                 job_cur = None
                 try:
                     now = datetime.datetime.now() # Time of detection
@@ -488,6 +549,9 @@ if __name__ == '__main__':
                                 if printer["id"] == p_id:
                                     printer["current_job_id"] = job_id
                                     break
+
+                            # Capture filament information for this job
+                            log_job_filament(job_id, p_id, current_filament_info)
 
                         # else:
                             # console.print(f"  Skipping job start log: Found {existing_unfinished_count} existing unfinished job(s) for printer ID {p_id}, file: {current_filename}") # Less verbose
@@ -1026,8 +1090,8 @@ if __name__ == '__main__':
                     # --- End Log Status Periodically ---
 
                     # --- Log Job History Event (On State Change) ---
-                    # Pass necessary info including remaining_time_min and percentage
-                    log_job_event(printer_id, status, gcode_file, previous_status, previous_filename, remaining_time_min, percentage)
+                    # Pass necessary info including remaining_time_min, percentage, and filament info
+                    log_job_event(printer_id, status, gcode_file, previous_status, previous_filename, remaining_time_min, percentage, current_filament_info)
                     # --- End Log Job History Event ---
 
                     # --- Update Previous State for next iteration ---
