@@ -244,6 +244,10 @@ class PrinterConnectionManager:
                 def fetch_status():
                     nonlocal result, error
                     try:
+                        # Get raw print data for tray_now field
+                        raw_data = self.client.mqtt_client.dump()
+                        print_data = raw_data.get('print', {})
+
                         result = {
                             'status': self.client.get_state(),
                             'percentage': self.client.get_percentage(),
@@ -254,7 +258,9 @@ class PrinterConnectionManager:
                             'nozzle_temp': self.client.get_nozzle_temperature(),
                             'remaining_time_min': self.client.get_time(),
                             'vt_tray': self._get_vt_tray_safe(),
-                            'ams_hub': self._get_ams_hub_safe()
+                            'ams_hub': self._get_ams_hub_safe(),
+                            'tray_now': print_data.get('tray_now'),  # Active tray ID
+                            'tray_tar': print_data.get('tray_tar')   # Target tray ID
                         }
                     except Exception as e:
                         error = e
@@ -684,55 +690,190 @@ class SafePrinterMonitor:
             logging.error(f"Error extracting filament info: {e}")
             return None
 
-    def _log_job_filament(self, job_id: int, printer_id: int, filament_info: Optional[Dict]):
-        """Save filament information for this print job."""
-        if not filament_info or not job_id:
+    def _log_job_filaments(self, job_id: int, printer_id: int, status_data: Dict):
+        """Save ALL filament information for this print job (supports multi-color prints)."""
+        if not job_id:
             return
 
         try:
-            db_info = filament_info.get('db_info', {}) or {}
+            filaments_captured = []
+            filaments_used = []
 
-            self.db_manager.execute_query(
-                """
-                INSERT INTO printer_job_filaments (
-                    job_history_id, printer_id, filament_id, tray_uuid,
-                    filament_name, filament_type, filament_color,
-                    filament_vendor, temp_min, temp_max, bed_temp,
-                    weight, cost, density, diameter
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (job_history_id) DO NOTHING;
-                """,
-                (
-                    job_id, printer_id,
-                    filament_info.get('tray_info_idx'),
-                    filament_info.get('tray_uuid'),
-                    db_info.get('db_name'),
-                    filament_info.get('type'),
-                    filament_info.get('color'),
-                    db_info.get('db_vendor') if db_info else filament_info.get('brand'),
-                    filament_info.get('temp_min'),
-                    filament_info.get('temp_max'),
-                    filament_info.get('bed_temp'),
-                    filament_info.get('weight'),
-                    db_info.get('db_cost'),
-                    db_info.get('db_density'),
-                    db_info.get('db_diameter') if db_info else filament_info.get('diameter')
-                )
-            )
+            # Get the currently active filament (vt_tray)
+            active_filament_info = self._extract_filament_info(status_data)
+            active_tray_uuid = active_filament_info.get('tray_uuid') if active_filament_info else None
 
-            # Build display string
-            filament_display = filament_info.get('type', 'Unknown')
-            if filament_info.get('color'):
-                filament_display += f" - {filament_info.get('color')}"
-            if db_info and db_info.get('db_name'):
-                filament_display += f" ({db_info.get('db_name')})"
+            # Get tray_now to identify which filament is actually being used
+            # tray_now format: integer where value encodes AMS unit and tray position
+            # Formula: tray_now = (ams_id * 4) + tray_id
+            # Example: tray_now=5 means AMS 1, Tray 1 (5 = 1*4 + 1)
+            # Special: tray_now=255 or tray_now=254 means external spool
+            tray_now = status_data.get('tray_now')
+            active_ams_id = None
+            active_tray_id = None
 
-            self.console.print(f"  [green]Filament captured:[/] {filament_display}")
+            if tray_now is not None:
+                tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+                if tray_now_int < 16:  # Valid AMS tray (0-15 covers 4 AMS units * 4 trays)
+                    active_ams_id = tray_now_int // 4
+                    active_tray_id = tray_now_int % 4
+                # else: external spool (255 or 254)
+
+            # Get AMS hub data for all loaded filaments
+            ams_hub = status_data.get('ams_hub')
+
+            if ams_hub:
+                # Printer has AMS - capture all loaded filaments
+                for ams_id in range(4):  # Check up to 4 AMS units
+                    try:
+                        ams = ams_hub[ams_id]
+                        # Get all 4 tray positions in this AMS
+                        for tray_id in range(4):
+                            tray = ams.get_filament_tray(tray_id)
+                            if tray:
+                                tray_info_idx = getattr(tray, 'tray_info_idx', None)
+                                tray_uuid = getattr(tray, 'tray_uuid', None)
+
+                                # Look up database info
+                                db_info = None
+                                if tray_info_idx and tray_info_idx not in ['N/A', '']:
+                                    try:
+                                        result = self.db_manager.execute_query(
+                                            """
+                                            SELECT name, material_type, vendor, nozzle_temp_min, nozzle_temp_max,
+                                                   bed_temp, density, cost, diameter
+                                            FROM bambu_filament_profiles
+                                            WHERE filament_id = %s
+                                            """,
+                                            (tray_info_idx,),
+                                            fetch=True
+                                        )
+                                        if result and len(result) > 0:
+                                            db_info = {
+                                                'db_name': result[0][0],
+                                                'db_vendor': result[0][2],
+                                                'db_temp_min': result[0][3],
+                                                'db_temp_max': result[0][4],
+                                                'db_bed_temp': result[0][5],
+                                                'db_density': result[0][6],
+                                                'db_cost': result[0][7],
+                                                'db_diameter': result[0][8]
+                                            }
+                                    except Exception:
+                                        pass
+
+                                # Extract tray color
+                                tray_color_raw = getattr(tray, 'tray_color', None)
+                                tray_color = None
+                                if tray_color_raw and tray_color_raw not in ['N/A', ''] and len(tray_color_raw) == 8 and tray_color_raw.endswith('FF'):
+                                    tray_color = tray_color_raw[:-2]
+                                elif tray_color_raw and tray_color_raw not in ['N/A', '']:
+                                    tray_color = tray_color_raw
+
+                                # Check if this is the primary (active) filament
+                                is_primary = (tray_uuid == active_tray_uuid) if active_tray_uuid else False
+
+                                # Check if this filament was actually used (matches tray_now)
+                                was_used = (ams_id == active_ams_id and tray_id == active_tray_id)
+
+                                # Insert filament record
+                                self.db_manager.execute_query(
+                                    """
+                                    INSERT INTO printer_job_filaments (
+                                        job_history_id, printer_id, filament_id, tray_uuid,
+                                        ams_id, tray_id, is_primary, was_used,
+                                        filament_name, filament_type, filament_color,
+                                        filament_vendor, temp_min, temp_max, bed_temp,
+                                        weight, cost, density, diameter
+                                    ) VALUES (
+                                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                    )
+                                    ON CONFLICT (job_history_id, ams_id, tray_id) DO NOTHING;
+                                    """,
+                                    (
+                                        job_id, printer_id,
+                                        tray_info_idx,
+                                        tray_uuid,
+                                        ams_id, tray_id, is_primary, was_used,
+                                        db_info.get('db_name') if db_info else None,
+                                        getattr(tray, 'tray_type', None),
+                                        tray_color,
+                                        db_info.get('db_vendor') if db_info else getattr(tray, 'tray_sub_brands', None),
+                                        getattr(tray, 'nozzle_temp_min', None),
+                                        getattr(tray, 'nozzle_temp_max', None),
+                                        getattr(tray, 'bed_temp', None),
+                                        getattr(tray, 'tray_weight', None),
+                                        db_info.get('db_cost') if db_info else None,
+                                        db_info.get('db_density') if db_info else None,
+                                        db_info.get('db_diameter') if db_info else getattr(tray, 'tray_diameter', None)
+                                    )
+                                )
+
+                                filament_type = db_info.get('db_name') if db_info and db_info.get('db_name') else getattr(tray, 'tray_type', 'Unknown')
+                                filament_desc = f"{filament_type} ({tray_color or 'no color'})"
+                                filaments_captured.append(filament_desc)
+                                if was_used:
+                                    filaments_used.append(filament_desc)
+
+                    except KeyError:
+                        # AMS unit doesn't exist
+                        continue
+
+            else:
+                # No AMS - capture single external spool filament
+                if active_filament_info:
+                    db_info = active_filament_info.get('db_info', {}) or {}
+
+                    # External spool is always considered "used" if it's active
+                    was_used = True
+
+                    self.db_manager.execute_query(
+                        """
+                        INSERT INTO printer_job_filaments (
+                            job_history_id, printer_id, filament_id, tray_uuid,
+                            ams_id, tray_id, is_primary, was_used,
+                            filament_name, filament_type, filament_color,
+                            filament_vendor, temp_min, temp_max, bed_temp,
+                            weight, cost, density, diameter
+                        ) VALUES (
+                            %s, %s, %s, %s, NULL, NULL, true, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (job_history_id, ams_id, tray_id) DO NOTHING;
+                        """,
+                        (
+                            job_id, printer_id,
+                            active_filament_info.get('tray_info_idx'),
+                            active_filament_info.get('tray_uuid'),
+                            was_used,
+                            db_info.get('db_name'),
+                            active_filament_info.get('type'),
+                            active_filament_info.get('color'),
+                            db_info.get('db_vendor') if db_info else active_filament_info.get('brand'),
+                            active_filament_info.get('temp_min'),
+                            active_filament_info.get('temp_max'),
+                            active_filament_info.get('bed_temp'),
+                            active_filament_info.get('weight'),
+                            db_info.get('db_cost'),
+                            db_info.get('db_density'),
+                            db_info.get('db_diameter') if db_info else active_filament_info.get('diameter')
+                        )
+                    )
+
+                    filament_type = db_info.get('db_name') if db_info and db_info.get('db_name') else active_filament_info.get('type', 'Unknown')
+                    filament_desc = f"{filament_type} ({active_filament_info.get('color', 'no color')})"
+                    filaments_captured.append(filament_desc)
+                    filaments_used.append(filament_desc)
+
+            # Display captured filaments
+            if filaments_captured:
+                self.console.print(f"  [green]Filaments loaded ({len(filaments_captured)}):[/] {', '.join(filaments_captured)}")
+                if filaments_used:
+                    self.console.print(f"  [cyan]Filaments actively used ({len(filaments_used)}):[/] {', '.join(filaments_used)}")
+            else:
+                self.console.print(f"  [yellow]No filament data captured[/]")
 
         except Exception as e:
-            logging.error(f"Failed to log filament for job {job_id}: {e}")
+            logging.error(f"Failed to log filaments for job {job_id}: {e}")
 
     def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start event."""
@@ -780,9 +921,8 @@ class SafePrinterMonitor:
                 manager.current_job_id = result[0][0]
                 self.console.print(f"  [green]Job START:[/] {gcode_file} (ID: {manager.current_job_id})")
 
-                # Capture filament information
-                filament_info = self._extract_filament_info(status_data)
-                self._log_job_filament(manager.current_job_id, manager.printer_id, filament_info)
+                # Capture ALL filament information (supports multi-color prints)
+                self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
     
     def _log_job_end(self, manager, status):
         """Log job end event."""
