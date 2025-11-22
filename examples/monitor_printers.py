@@ -539,10 +539,10 @@ class SafePrinterMonitor:
             
             # Update database
             self._update_printer_database(manager, status, remaining_time_min, gcode_file, percentage)
-            
-            # Log job events
-            self._log_job_event(manager, status, gcode_file, remaining_time_min, percentage)
-            
+
+            # Log job events (pass full status_data for filament extraction)
+            self._log_job_event(manager, status, gcode_file, remaining_time_min, percentage, status_data)
+
             # Update manager state
             manager.previous_status = status
             manager.previous_filename = gcode_file
@@ -578,27 +578,166 @@ class SafePrinterMonitor:
         except Exception as e:
             logging.error(f"Failed to update database for {manager.name}: {e}")
     
-    def _log_job_event(self, manager, status, gcode_file, remaining_time_min, percentage):
+    def _log_job_event(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start/end events."""
         try:
             is_running = status == "RUNNING"
             was_running = manager.previous_status == "RUNNING"
-            
+
             # Job start detection
             if not was_running and is_running and gcode_file and gcode_file != 'N/A':
-                self._log_job_start(manager, status, gcode_file, remaining_time_min, percentage)
-            
+                self._log_job_start(manager, status, gcode_file, remaining_time_min, percentage, status_data)
+
             # Job end detection
             elif was_running and not is_running and manager.previous_filename and manager.previous_filename != 'N/A':
                 self._log_job_end(manager, status)
-                
+
         except Exception as e:
             logging.error(f"Failed to log job event for {manager.name}: {e}")
     
-    def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage):
+    def _extract_filament_info(self, status_data: Dict) -> Optional[Dict]:
+        """Extract and process filament information from status data."""
+        try:
+            vt_tray = status_data.get('vt_tray')
+            if not vt_tray:
+                return None
+
+            # Extract filament information
+            tray_type = getattr(vt_tray, 'tray_type', None)
+            tray_color_raw = getattr(vt_tray, 'tray_color', None)
+
+            # Remove FF suffix if present (8-char hex -> 6-char hex)
+            tray_color = None
+            if tray_color_raw and tray_color_raw not in ['N/A', ''] and len(tray_color_raw) == 8 and tray_color_raw.endswith('FF'):
+                tray_color = tray_color_raw[:-2]
+            elif tray_color_raw and tray_color_raw not in ['N/A', '']:
+                tray_color = tray_color_raw
+
+            tray_weight = getattr(vt_tray, 'tray_weight', None)
+            tray_brand = getattr(vt_tray, 'tray_sub_brands', None)
+            tray_info_idx = getattr(vt_tray, 'tray_info_idx', None)
+            tray_diameter = getattr(vt_tray, 'tray_diameter', None)
+            tray_uuid = getattr(vt_tray, 'tray_uuid', None)
+            bed_temp = getattr(vt_tray, 'bed_temp', None)
+
+            # Convert temperature values
+            temp_min = 0
+            temp_max = 0
+            bed_temp_int = 0
+            try:
+                temp_min_raw = getattr(vt_tray, 'nozzle_temp_min', 0)
+                temp_max_raw = getattr(vt_tray, 'nozzle_temp_max', 0)
+                temp_min = int(temp_min_raw) if temp_min_raw not in ['N/A', '', None] else 0
+                temp_max = int(temp_max_raw) if temp_max_raw not in ['N/A', '', None] else 0
+                bed_temp_int = int(bed_temp) if bed_temp not in ['N/A', '', None] else 0
+            except (ValueError, TypeError):
+                pass
+
+            # Look up filament information from database if available
+            db_info = None
+            if tray_info_idx and tray_info_idx not in ['N/A', '']:
+                try:
+                    result = self.db_manager.execute_query(
+                        """
+                        SELECT name, material_type, vendor, nozzle_temp_min, nozzle_temp_max,
+                               bed_temp, density, cost, diameter
+                        FROM bambu_filament_profiles
+                        WHERE filament_id = %s
+                        """,
+                        (tray_info_idx,),
+                        fetch=True
+                    )
+                    if result and len(result) > 0:
+                        db_info = {
+                            'db_name': result[0][0],
+                            'db_material_type': result[0][1],
+                            'db_vendor': result[0][2],
+                            'db_temp_min': result[0][3],
+                            'db_temp_max': result[0][4],
+                            'db_bed_temp': result[0][5],
+                            'db_density': result[0][6],
+                            'db_cost': result[0][7],
+                            'db_diameter': result[0][8]
+                        }
+                except Exception:
+                    pass
+
+            # Only create filament info if we have meaningful data
+            if tray_type and tray_type not in ['N/A', ''] and (temp_min > 0 or temp_max > 0 or db_info or (tray_color and tray_color not in ['000000', '00000000'])):
+                return {
+                    'type': tray_type,
+                    'color': tray_color,
+                    'temp_min': temp_min,
+                    'temp_max': temp_max,
+                    'bed_temp': bed_temp_int,
+                    'weight': tray_weight,
+                    'brand': tray_brand,
+                    'diameter': tray_diameter,
+                    'tray_info_idx': tray_info_idx,
+                    'tray_uuid': tray_uuid,
+                    'db_info': db_info
+                }
+
+            return None
+
+        except Exception as e:
+            logging.error(f"Error extracting filament info: {e}")
+            return None
+
+    def _log_job_filament(self, job_id: int, printer_id: int, filament_info: Optional[Dict]):
+        """Save filament information for this print job."""
+        if not filament_info or not job_id:
+            return
+
+        try:
+            db_info = filament_info.get('db_info', {}) or {}
+
+            self.db_manager.execute_query(
+                """
+                INSERT INTO printer_job_filaments (
+                    job_history_id, printer_id, filament_id, tray_uuid,
+                    filament_name, filament_type, filament_color,
+                    filament_vendor, temp_min, temp_max, bed_temp,
+                    weight, cost, density, diameter
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT (job_history_id) DO NOTHING;
+                """,
+                (
+                    job_id, printer_id,
+                    filament_info.get('tray_info_idx'),
+                    filament_info.get('tray_uuid'),
+                    db_info.get('db_name'),
+                    filament_info.get('type'),
+                    filament_info.get('color'),
+                    db_info.get('db_vendor') if db_info else filament_info.get('brand'),
+                    filament_info.get('temp_min'),
+                    filament_info.get('temp_max'),
+                    filament_info.get('bed_temp'),
+                    filament_info.get('weight'),
+                    db_info.get('db_cost'),
+                    db_info.get('db_density'),
+                    db_info.get('db_diameter') if db_info else filament_info.get('diameter')
+                )
+            )
+
+            # Build display string
+            filament_display = filament_info.get('type', 'Unknown')
+            if filament_info.get('color'):
+                filament_display += f" - {filament_info.get('color')}"
+            if db_info and db_info.get('db_name'):
+                filament_display += f" ({db_info.get('db_name')})"
+
+            self.console.print(f"  [green]Filament captured:[/] {filament_display}")
+
+        except Exception as e:
+            logging.error(f"Failed to log filament for job {job_id}: {e}")
+
+    def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start event."""
         now = datetime.datetime.now()
-        
+
         # Check for existing unfinished job
         existing = self.db_manager.execute_query(
             """
@@ -608,12 +747,12 @@ class SafePrinterMonitor:
             (manager.printer_id, gcode_file),
             fetch=True
         )
-        
+
         if existing and existing[0][0] == 0:
             # Calculate estimated start time
             actual_start_time = now
             interval_string = None
-            
+
             if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
                 remaining_seconds = int(remaining_time_min * 60)
                 if isinstance(percentage, (int, float)) and 0 < percentage < 100:
@@ -626,7 +765,7 @@ class SafePrinterMonitor:
                         interval_string = f"{remaining_seconds} seconds"
                 else:
                     interval_string = f"{remaining_seconds} seconds"
-            
+
             # Insert job start
             result = self.db_manager.execute_query(
                 """
@@ -636,10 +775,14 @@ class SafePrinterMonitor:
                 (manager.printer_id, gcode_file, actual_start_time, status, interval_string),
                 fetch=True
             )
-            
+
             if result:
                 manager.current_job_id = result[0][0]
                 self.console.print(f"  [green]Job START:[/] {gcode_file} (ID: {manager.current_job_id})")
+
+                # Capture filament information
+                filament_info = self._extract_filament_info(status_data)
+                self._log_job_filament(manager.current_job_id, manager.printer_id, filament_info)
     
     def _log_job_end(self, manager, status):
         """Log job end event."""
