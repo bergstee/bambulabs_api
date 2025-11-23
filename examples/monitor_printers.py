@@ -387,10 +387,10 @@ class SafePrinterMonitor:
         self.mqtt_logger = mqtt_logger
     
     def initialize_printers(self):
-        """Initialize all printers from database."""
+        """Initialize all printers from database where in_production is true."""
         try:
             printers_data = self.db_manager.execute_query(
-                "SELECT printer_id, printer_name, printer_ip, printer_bambu_id, access_code FROM printers;",
+                "SELECT printer_id, printer_name, printer_ip, printer_bambu_id, access_code FROM printers WHERE in_production = true;",
                 fetch=True
             )
             
