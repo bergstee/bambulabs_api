@@ -10,6 +10,7 @@ import platform
 import datetime
 import logging
 import logging.handlers  # Add this explicit import
+import json
 from rich.console import Console
 from rich.table import Table
 from typing import Optional, Dict, List, Tuple
@@ -118,20 +119,21 @@ class DatabaseConnectionManager:
 class PrinterConnectionManager:
     """Manages printer connections with health checking and automatic recovery."""
     
-    def __init__(self, printer_id, name, ip, serial, access_code, db_manager):
+    def __init__(self, printer_id, name, ip, serial, access_code, db_manager, mqtt_logger=None):
         self.printer_id = printer_id
         self.name = name
         self.ip = ip
         self.serial = serial
         self.access_code = access_code
         self.db_manager = db_manager
+        self.mqtt_logger = mqtt_logger
         self.client = None
         self.console = Console(legacy_windows=True)
         self.consecutive_failures = 0
         self.last_successful_poll = time.time()
         self.is_connected = False
         self.lock = threading.Lock()
-        
+
         # State tracking
         self.previous_status = None
         self.previous_filename = None
@@ -246,6 +248,12 @@ class PrinterConnectionManager:
                     try:
                         # Get raw print data for tray_now field
                         raw_data = self.client.mqtt_client.dump()
+
+                        # Log raw MQTT data to file
+                        if self.mqtt_logger:
+                            mqtt_json = json.dumps(raw_data, indent=2)
+                            self.mqtt_logger.info(f"Printer: {self.name}\n{mqtt_json}")
+
                         print_data = raw_data.get('print', {})
 
                         result = {
@@ -339,25 +347,44 @@ class SafePrinterMonitor:
     def _setup_logging(self):
         """Configure logging with rotation."""
         log_file = os.path.join(os.path.dirname(__file__), 'monitor_printers.log')
-        
+
         # Create handlers
         file_handler = logging.handlers.RotatingFileHandler(
-            log_file, 
+            log_file,
             maxBytes=10*1024*1024,  # 10MB
             backupCount=5
         )
         console_handler = logging.StreamHandler()
-        
+
         # Set format
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(formatter)
         console_handler.setFormatter(formatter)
-        
+
         # Configure root logger
         logger = logging.getLogger()
         logger.setLevel(logging.ERROR)
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
+
+        # Set up MQTT message logger (keeps last ~200 lines)
+        mqtt_log_file = os.path.join(os.path.dirname(__file__), 'mqtt_messages.log')
+        mqtt_logger = logging.getLogger('mqtt_messages')
+        mqtt_logger.setLevel(logging.INFO)
+        mqtt_logger.propagate = False  # Don't propagate to root logger
+
+        # Each line is roughly 500 bytes, so 100KB should hold ~200 lines
+        mqtt_file_handler = logging.handlers.RotatingFileHandler(
+            mqtt_log_file,
+            maxBytes=100*1024,  # 100KB for ~200 lines
+            backupCount=1  # Keep only 1 backup file
+        )
+        mqtt_formatter = logging.Formatter('%(asctime)s - %(message)s')
+        mqtt_file_handler.setFormatter(mqtt_formatter)
+        mqtt_logger.addHandler(mqtt_file_handler)
+
+        # Store reference for later use
+        self.mqtt_logger = mqtt_logger
     
     def initialize_printers(self):
         """Initialize all printers from database."""
@@ -377,7 +404,7 @@ class SafePrinterMonitor:
                     continue
                 
                 manager = PrinterConnectionManager(
-                    printer_id, name, ip, serial, access_code, self.db_manager
+                    printer_id, name, ip, serial, access_code, self.db_manager, self.mqtt_logger
                 )
                 
                 if manager.connect():
@@ -478,7 +505,7 @@ class SafePrinterMonitor:
         for printer_data in self.unreachable_printers:
             printer_id, name, ip, serial, access_code = printer_data
             manager = PrinterConnectionManager(
-                printer_id, name, ip, serial, access_code, self.db_manager
+                printer_id, name, ip, serial, access_code, self.db_manager, self.mqtt_logger
             )
             
             if manager.connect():
