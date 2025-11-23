@@ -594,6 +594,10 @@ class SafePrinterMonitor:
             if not was_running and is_running and gcode_file and gcode_file != 'N/A':
                 self._log_job_start(manager, status, gcode_file, remaining_time_min, percentage, status_data)
 
+            # During print: track filament usage changes
+            elif is_running and was_running and manager.current_job_id:
+                self._update_filament_usage(manager.current_job_id, status_data)
+
             # Job end detection
             elif was_running and not is_running and manager.previous_filename and manager.previous_filename != 'N/A':
                 self._log_job_end(manager, status)
@@ -601,6 +605,38 @@ class SafePrinterMonitor:
         except Exception as e:
             logging.error(f"Failed to log job event for {manager.name}: {e}")
     
+    def _update_filament_usage(self, job_id: int, status_data: Dict):
+        """Update was_used flags during printing as tray_now changes."""
+        try:
+            # Get current tray_now
+            tray_now = status_data.get('tray_now')
+            if tray_now is None:
+                return
+
+            tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+
+            # Decode tray_now to get active AMS and tray
+            if tray_now_int < 16:  # Valid AMS tray
+                active_ams_id = tray_now_int // 4
+                active_tray_id = tray_now_int % 4
+
+                # Update was_used flag for this filament
+                self.db_manager.execute_query(
+                    """
+                    UPDATE printer_job_filaments
+                    SET was_used = true
+                    WHERE job_history_id = %s
+                      AND ams_id = %s
+                      AND tray_id = %s
+                      AND was_used = false;
+                    """,
+                    (job_id, active_ams_id, active_tray_id)
+                )
+            # For external spool (255/254), it's already marked as used at job start
+
+        except Exception as e:
+            logging.error(f"Failed to update filament usage for job {job_id}: {e}")
+
     def _extract_filament_info(self, status_data: Dict) -> Optional[Dict]:
         """Extract and process filament information from status data."""
         try:
