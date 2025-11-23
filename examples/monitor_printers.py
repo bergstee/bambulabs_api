@@ -611,27 +611,40 @@ class SafePrinterMonitor:
             # Get current tray_now
             tray_now = status_data.get('tray_now')
             if tray_now is None:
+                logging.debug(f"Job {job_id}: tray_now is None")
                 return
 
             tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+            logging.debug(f"Job {job_id}: tray_now = {tray_now_int}")
 
             # Decode tray_now to get active AMS and tray
             if tray_now_int < 16:  # Valid AMS tray
                 active_ams_id = tray_now_int // 4
                 active_tray_id = tray_now_int % 4
 
+                logging.info(f"Job {job_id}: Marking AMS {active_ams_id}, Tray {active_tray_id} as used (tray_now={tray_now_int})")
+
                 # Update was_used flag for this filament
-                self.db_manager.execute_query(
+                rows_affected = self.db_manager.execute_query(
                     """
                     UPDATE printer_job_filaments
                     SET was_used = true
                     WHERE job_history_id = %s
                       AND ams_id = %s
                       AND tray_id = %s
-                      AND was_used = false;
+                      AND was_used = false
+                    RETURNING ams_id, tray_id;
                     """,
-                    (job_id, active_ams_id, active_tray_id)
+                    (job_id, active_ams_id, active_tray_id),
+                    fetch=True
                 )
+
+                if rows_affected:
+                    logging.info(f"Job {job_id}: Updated {len(rows_affected)} filament(s) to was_used=true")
+                    # Also show in console for visibility
+                    self.console.print(f"  [cyan]→ Filament usage detected:[/] AMS {active_ams_id}, Tray {active_tray_id} now marked as USED")
+            else:
+                logging.debug(f"Job {job_id}: tray_now={tray_now_int} is external spool")
             # For external spool (255/254), it's already marked as used at job start
 
         except Exception as e:
@@ -900,11 +913,23 @@ class SafePrinterMonitor:
                     filaments_captured.append(filament_desc)
                     filaments_used.append(filament_desc)
 
-            # Display captured filaments
+            # Display captured filaments with detailed info
             if filaments_captured:
+                # Show tray_now debug info
+                tray_now_display = "None"
+                if tray_now is not None:
+                    tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+                    if tray_now_int < 16:
+                        tray_now_display = f"{tray_now_int} (AMS {active_ams_id}, Tray {active_tray_id})"
+                    else:
+                        tray_now_display = f"{tray_now_int} (External)"
+
+                self.console.print(f"  [dim]tray_now: {tray_now_display}[/]")
                 self.console.print(f"  [green]Filaments loaded ({len(filaments_captured)}):[/] {', '.join(filaments_captured)}")
                 if filaments_used:
                     self.console.print(f"  [cyan]Filaments actively used ({len(filaments_used)}):[/] {', '.join(filaments_used)}")
+                else:
+                    self.console.print(f"  [yellow]No filaments marked as used yet (tray_now may not be set)[/]")
             else:
                 self.console.print(f"  [yellow]No filament data captured[/]")
 
