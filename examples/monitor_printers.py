@@ -540,7 +540,18 @@ class SafePrinterMonitor:
             table.add_row("Layer", f"{layer_num}/{total_layer_num}")
             table.add_row("Temps", f"Bed: {bed_temp}°C, Nozzle: {nozzle_temp}°C")
             table.add_row("Est. Finish", finish_time_str)
-            
+
+            # Add tray_now info if available
+            tray_now = status_data.get('tray_now')
+            if tray_now is not None:
+                tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+                if tray_now_int < 16:
+                    ams_id = tray_now_int // 4
+                    tray_id = tray_now_int % 4
+                    table.add_row("Active Tray", f"AMS {ams_id}, Tray {tray_id}")
+                elif tray_now_int in [254, 255]:
+                    table.add_row("Active Tray", "External Spool")
+
             self.console.print(table)
             
             # Update database
