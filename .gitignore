@@ -176,6 +176,4 @@ cython_debug/
 
 # Environment variables file
 .env
-examples/mqtt_messages.log.1
-*examples/mqtt_messages.*
-
+/examples/mqtt_messages.*
