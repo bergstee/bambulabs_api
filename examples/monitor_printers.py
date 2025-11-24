@@ -732,7 +732,7 @@ class SafePrinterMonitor:
                 if rows_affected:
                     logging.info(f"Job {job_id}: Updated {len(rows_affected)} filament(s) to was_used=true")
                     # Also show in console for visibility
-                    self.console.print(f"  [green]✓ Filament usage detected:[/] AMS {active_ams_id}, Tray {active_tray_id} now marked as USED")
+                    self.console.print(f"  [green][OK] Filament usage detected:[/] AMS {active_ams_id}, Tray {active_tray_id} now marked as USED")
                 else:
                     self.console.print(f"  [yellow]DEBUG: No rows updated (already marked as used, or filament not found)[/]")
             elif tray_now_int in [254, 255]:
