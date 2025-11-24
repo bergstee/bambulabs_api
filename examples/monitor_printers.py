@@ -165,6 +165,10 @@ class PrinterConnectionManager:
                         self.consecutive_failures = 0
                         self.last_successful_poll = time.time()
                         self.console.print(f"[green]Connected to {self.name}[/]")
+
+                        # Load any ongoing job from database
+                        self._load_ongoing_job()
+
                         return True
                     time.sleep(0.5)
                 
@@ -204,7 +208,39 @@ class PrinterConnectionManager:
             finally:
                 self.client = None
                 self.is_connected = False
-    
+
+    def _load_ongoing_job(self):
+        """Load any ongoing job from database on startup to track it properly."""
+        try:
+            # Query for unfinished jobs for this printer
+            result = self.db_manager.execute_query(
+                """
+                SELECT id, filename, start_time
+                FROM printer_job_history
+                WHERE printer_id = %s
+                  AND end_time IS NULL
+                ORDER BY start_time DESC
+                LIMIT 1;
+                """,
+                (self.printer_id,),
+                fetch=True
+            )
+
+            if result and len(result) > 0:
+                job_id, filename, start_time = result[0]
+                self.current_job_id = job_id
+                self.previous_filename = filename
+                self.previous_status = "RUNNING"  # Assume it's running since end_time is NULL
+
+                self.console.print(f"  [cyan]Loaded ongoing job:[/] ID={job_id}, File={filename}, Started={start_time}")
+                logging.info(f"Printer {self.name}: Loaded ongoing job ID {job_id} ({filename}) from database")
+            else:
+                self.console.print(f"  [dim]No ongoing job found in database for {self.name}[/]")
+
+        except Exception as e:
+            logging.error(f"Failed to load ongoing job for {self.name}: {e}")
+            self.console.print(f"  [red]Error loading ongoing job: {e}[/]")
+
     def check_health(self) -> bool:
         """Check if the printer connection is healthy."""
         with self.lock:
@@ -817,6 +853,10 @@ class SafePrinterMonitor:
             # Example: tray_now=5 means AMS 1, Tray 1 (5 = 1*4 + 1)
             # Special: tray_now=255 or tray_now=254 means external spool
             tray_now = status_data.get('tray_now')
+
+            # DEBUG: Show tray_now at job start
+            self.console.print(f"  [dim]DEBUG _log_job_filaments: tray_now = {tray_now} (type: {type(tray_now)})[/]")
+
             active_ams_id = None
             active_tray_id = None
 
@@ -883,6 +923,9 @@ class SafePrinterMonitor:
 
                                 # Check if this filament was actually used (matches tray_now)
                                 was_used = (ams_id == active_ams_id and tray_id == active_tray_id)
+
+                                # DEBUG: Show what was_used is being set to
+                                self.console.print(f"  [dim]DEBUG: AMS {ams_id} Tray {tray_id}: was_used={was_used} (active_ams_id={active_ams_id}, active_tray_id={active_tray_id})[/]")
 
                                 # Insert filament record
                                 self.db_manager.execute_query(
