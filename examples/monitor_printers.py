@@ -708,7 +708,7 @@ class SafePrinterMonitor:
                 active_ams_id = tray_now_int // 4
                 active_tray_id = tray_now_int % 4
 
-                self.console.print(f"  [cyan]DEBUG: Decoded tray_now={tray_now_int} → AMS {active_ams_id}, Tray {active_tray_id}[/]")
+                self.console.print(f"  [cyan]DEBUG: Decoded tray_now={tray_now_int} -> AMS {active_ams_id}, Tray {active_tray_id}[/]")
                 logging.info(f"Job {job_id}: Marking AMS {active_ams_id}, Tray {active_tray_id} as used (tray_now={tray_now_int})")
 
                 # Update was_used flag for this filament
