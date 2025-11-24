@@ -646,13 +646,19 @@ class SafePrinterMonitor:
     def _update_filament_usage(self, job_id: int, status_data: Dict):
         """Update was_used flags during printing as tray_now changes."""
         try:
+            self.console.print(f"  [dim]DEBUG: _update_filament_usage called for job {job_id}[/]")
+
             # Get current tray_now
             tray_now = status_data.get('tray_now')
+            self.console.print(f"  [dim]DEBUG: tray_now from status_data = {tray_now} (type: {type(tray_now)})[/]")
+
             if tray_now is None:
+                self.console.print(f"  [yellow]DEBUG: tray_now is None, cannot update filament usage[/]")
                 logging.debug(f"Job {job_id}: tray_now is None")
                 return
 
             tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+            self.console.print(f"  [dim]DEBUG: tray_now_int = {tray_now_int}[/]")
             logging.debug(f"Job {job_id}: tray_now = {tray_now_int}")
 
             # Decode tray_now to get active AMS and tray
@@ -660,9 +666,11 @@ class SafePrinterMonitor:
                 active_ams_id = tray_now_int // 4
                 active_tray_id = tray_now_int % 4
 
+                self.console.print(f"  [cyan]DEBUG: Decoded tray_now={tray_now_int} → AMS {active_ams_id}, Tray {active_tray_id}[/]")
                 logging.info(f"Job {job_id}: Marking AMS {active_ams_id}, Tray {active_tray_id} as used (tray_now={tray_now_int})")
 
                 # Update was_used flag for this filament
+                self.console.print(f"  [dim]DEBUG: Running UPDATE query for job_id={job_id}, ams_id={active_ams_id}, tray_id={active_tray_id}[/]")
                 rows_affected = self.db_manager.execute_query(
                     """
                     UPDATE printer_job_filaments
@@ -677,15 +685,23 @@ class SafePrinterMonitor:
                     fetch=True
                 )
 
+                self.console.print(f"  [dim]DEBUG: UPDATE query returned: {rows_affected}[/]")
+
                 if rows_affected:
                     logging.info(f"Job {job_id}: Updated {len(rows_affected)} filament(s) to was_used=true")
                     # Also show in console for visibility
-                    self.console.print(f"  [cyan]→ Filament usage detected:[/] AMS {active_ams_id}, Tray {active_tray_id} now marked as USED")
-            else:
+                    self.console.print(f"  [green]✓ Filament usage detected:[/] AMS {active_ams_id}, Tray {active_tray_id} now marked as USED")
+                else:
+                    self.console.print(f"  [yellow]DEBUG: No rows updated (already marked as used, or filament not found)[/]")
+            elif tray_now_int in [254, 255]:
+                self.console.print(f"  [dim]DEBUG: tray_now={tray_now_int} is external spool (already marked as used at job start)[/]")
                 logging.debug(f"Job {job_id}: tray_now={tray_now_int} is external spool")
+            else:
+                self.console.print(f"  [yellow]DEBUG: tray_now={tray_now_int} is unexpected value[/]")
             # For external spool (255/254), it's already marked as used at job start
 
         except Exception as e:
+            self.console.print(f"  [red]DEBUG: Exception in _update_filament_usage: {e}[/]")
             logging.error(f"Failed to update filament usage for job {job_id}: {e}")
 
     def _extract_filament_info(self, status_data: Dict) -> Optional[Dict]:
