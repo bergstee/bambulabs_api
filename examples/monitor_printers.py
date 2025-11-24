@@ -291,6 +291,7 @@ class PrinterConnectionManager:
                             self.mqtt_logger.info(f"Printer: {self.name}\n{mqtt_json}")
 
                         print_data = raw_data.get('print', {})
+                        ams_data = print_data.get('ams', {})
 
                         result = {
                             'status': self.client.get_state(),
@@ -303,8 +304,8 @@ class PrinterConnectionManager:
                             'remaining_time_min': self.client.get_time(),
                             'vt_tray': self._get_vt_tray_safe(),
                             'ams_hub': self._get_ams_hub_safe(),
-                            'tray_now': print_data.get('tray_now'),  # Active tray ID
-                            'tray_tar': print_data.get('tray_tar')   # Target tray ID
+                            'tray_now': ams_data.get('tray_now'),  # Active tray ID (from ams object)
+                            'tray_tar': ams_data.get('tray_tar')   # Target tray ID (from ams object)
                         }
                     except Exception as e:
                         error = e
