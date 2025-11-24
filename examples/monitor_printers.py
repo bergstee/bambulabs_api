@@ -630,15 +630,20 @@ class SafePrinterMonitor:
 
             # Job start detection
             if not was_running and is_running and gcode_file and gcode_file != 'N/A':
+                self.console.print(f"  [dim]DEBUG: Detected job START (was_running={was_running}, is_running={is_running})[/]")
                 self._log_job_start(manager, status, gcode_file, remaining_time_min, percentage, status_data)
 
             # During print: track filament usage changes
             elif is_running and was_running and manager.current_job_id:
+                self.console.print(f"  [dim]DEBUG: Job RUNNING, calling _update_filament_usage (job_id={manager.current_job_id})[/]")
                 self._update_filament_usage(manager.current_job_id, status_data)
 
             # Job end detection
             elif was_running and not is_running and manager.previous_filename and manager.previous_filename != 'N/A':
+                self.console.print(f"  [dim]DEBUG: Detected job END (was_running={was_running}, is_running={is_running})[/]")
                 self._log_job_end(manager, status)
+            else:
+                self.console.print(f"  [dim]DEBUG: No job event triggered (is_running={is_running}, was_running={was_running}, current_job_id={manager.current_job_id})[/]")
 
         except Exception as e:
             logging.error(f"Failed to log job event for {manager.name}: {e}")
