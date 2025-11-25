@@ -139,6 +139,7 @@ class PrinterConnectionManager:
         self.previous_filename = None
         self.last_log_timestamp = 0
         self.current_job_id = None
+        self.needs_filament_backfill = False  # Flag to backfill filament info for loaded jobs
     
     def connect(self) -> bool:
         """Establish connection to the printer with proper error handling."""
@@ -234,6 +235,23 @@ class PrinterConnectionManager:
 
                 self.console.print(f"  [cyan]Loaded ongoing job:[/] ID={job_id}, File={filename}, Started={start_time}")
                 logging.info(f"Printer {self.name}: Loaded ongoing job ID {job_id} ({filename}) from database")
+
+                # Check if filament info exists for this job
+                filament_count = self.db_manager.execute_query(
+                    """
+                    SELECT COUNT(*) FROM printer_job_filaments
+                    WHERE job_history_id = %s;
+                    """,
+                    (job_id,),
+                    fetch=True
+                )
+
+                if filament_count and filament_count[0][0] == 0:
+                    self.needs_filament_backfill = True
+                    self.console.print(f"  [yellow]No filament info found for job {job_id} - will backfill on next poll[/]")
+                    logging.info(f"Printer {self.name}: Job {job_id} needs filament backfill")
+                else:
+                    self.console.print(f"  [dim]Filament info already exists for job {job_id}[/]")
             else:
                 self.console.print(f"  [dim]No ongoing job found in database for {self.name}[/]")
 
@@ -664,6 +682,13 @@ class SafePrinterMonitor:
         try:
             is_running = status == "RUNNING"
             was_running = manager.previous_status == "RUNNING"
+
+            # Check if we need to backfill filament info for a loaded ongoing job
+            if manager.needs_filament_backfill and manager.current_job_id and is_running:
+                self.console.print(f"  [cyan]Backfilling filament info for job {manager.current_job_id}...[/]")
+                self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
+                manager.needs_filament_backfill = False
+                logging.info(f"Printer {manager.name}: Backfilled filament info for job {manager.current_job_id}")
 
             # Job start detection
             if not was_running and is_running and gcode_file and gcode_file != 'N/A':
