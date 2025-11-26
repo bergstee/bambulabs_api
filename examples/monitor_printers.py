@@ -652,7 +652,7 @@ class SafePrinterMonitor:
     def _update_printer_database(self, manager, status, remaining_time_min, gcode_file, percentage):
         """Update printer status in database."""
         try:
-            now = datetime.datetime.now()
+            now = datetime.datetime.utcnow()  # Use UTC for consistent timezone handling
             remaining_seconds = None
             if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
                 remaining_seconds = int(remaining_time_min * 60)
@@ -1066,7 +1066,7 @@ class SafePrinterMonitor:
 
     def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start event."""
-        now = datetime.datetime.now()
+        now = datetime.datetime.utcnow()  # Use UTC for consistent timezone handling
 
         # Check for existing unfinished job
         existing = self.db_manager.execute_query(
@@ -1115,7 +1115,7 @@ class SafePrinterMonitor:
     
     def _log_job_end(self, manager, status):
         """Log job end event."""
-        now = datetime.datetime.now()
+        now = datetime.datetime.utcnow()  # Use UTC for consistent timezone handling
         
         rows_updated = self.db_manager.execute_query(
             """
