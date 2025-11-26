@@ -652,7 +652,7 @@ class SafePrinterMonitor:
     def _update_printer_database(self, manager, status, remaining_time_min, gcode_file, percentage):
         """Update printer status in database."""
         try:
-            now = datetime.datetime.utcnow()  # Use UTC for consistent timezone handling
+            now = datetime.datetime.now()  # Use local time since DB uses "timestamp without time zone"
             remaining_seconds = None
             if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
                 remaining_seconds = int(remaining_time_min * 60)
@@ -1066,7 +1066,7 @@ class SafePrinterMonitor:
 
     def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start event."""
-        now = datetime.datetime.utcnow()  # Use UTC for consistent timezone handling
+        now = datetime.datetime.now()  # Use local time since DB uses "timestamp without time zone"
 
         # Check for existing unfinished job
         existing = self.db_manager.execute_query(
@@ -1090,8 +1090,13 @@ class SafePrinterMonitor:
                         estimated_total_seconds = int(float(remaining_seconds) * 100.0 / (100.0 - float(percentage)))
                         interval_string = f"{estimated_total_seconds} seconds"
                         elapsed_seconds = (float(percentage) * float(remaining_seconds)) / (100.0 - float(percentage))
-                        actual_start_time = now - datetime.timedelta(seconds=elapsed_seconds)
-                    except:
+                        # Sanity check: elapsed time should be positive and not exceed total estimated time
+                        if elapsed_seconds > 0 and elapsed_seconds < estimated_total_seconds:
+                            actual_start_time = now - datetime.timedelta(seconds=elapsed_seconds)
+                        else:
+                            logging.warning(f"Invalid elapsed_seconds calculation: {elapsed_seconds}, using current time")
+                    except Exception as calc_error:
+                        logging.warning(f"Error calculating start time: {calc_error}")
                         interval_string = f"{remaining_seconds} seconds"
                 else:
                     interval_string = f"{remaining_seconds} seconds"
@@ -1115,7 +1120,7 @@ class SafePrinterMonitor:
     
     def _log_job_end(self, manager, status):
         """Log job end event."""
-        now = datetime.datetime.utcnow()  # Use UTC for consistent timezone handling
+        now = datetime.datetime.now()  # Use local time since DB uses "timestamp without time zone"
         
         rows_updated = self.db_manager.execute_query(
             """
