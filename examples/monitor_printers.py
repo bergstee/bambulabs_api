@@ -664,7 +664,7 @@ class SafePrinterMonitor:
                 """
                 UPDATE printers
                 SET last_poll_status = %s,
-                    last_polled_at = NOW(),
+                    last_polled_at = LOCALTIMESTAMP,
                     remaining_time = %s,
                     current_print_job = %s,
                     Print_Progress = %s
@@ -719,6 +719,7 @@ class SafePrinterMonitor:
         Uses UPSERT to update existing records or create new ones.
         """
         if not job_id:
+            self.console.print(f"  [yellow]DEBUG _update_job_filaments: No job_id provided[/]")
             return
 
         try:
@@ -728,6 +729,7 @@ class SafePrinterMonitor:
 
             # Get AMS hub data for all loaded filaments
             ams_hub = status_data.get('ams_hub')
+            self.console.print(f"  [dim]DEBUG _update_job_filaments: job_id={job_id}, ams_hub={'present' if ams_hub else 'None'}[/]")
 
             if ams_hub:
                 # Printer has AMS - update all loaded filaments
@@ -790,7 +792,7 @@ class SafePrinterMonitor:
                                     ) VALUES (
                                         %s, %s, %s, %s, %s, %s, %s, false, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                                     )
-                                    ON CONFLICT (job_history_id, ams_id, tray_id) DO UPDATE SET
+                                    ON CONFLICT (job_history_id, COALESCE(ams_id, -1), COALESCE(tray_id, -1)) DO UPDATE SET
                                         filament_id = EXCLUDED.filament_id,
                                         tray_uuid = EXCLUDED.tray_uuid,
                                         is_primary = EXCLUDED.is_primary,
@@ -824,12 +826,14 @@ class SafePrinterMonitor:
                                         db_info.get('db_diameter') if db_info else getattr(tray, 'tray_diameter', None)
                                     )
                                 )
+                                self.console.print(f"  [dim]DEBUG: UPSERT filament AMS {ams_id} Tray {tray_id}[/]")
 
                     except KeyError:
                         continue
 
             else:
                 # No AMS - update external spool filament
+                self.console.print(f"  [dim]DEBUG _update_job_filaments: No AMS hub, checking for external spool[/]")
                 if active_filament_info:
                     db_info = active_filament_info.get('db_info', {}) or {}
 
@@ -844,7 +848,7 @@ class SafePrinterMonitor:
                         ) VALUES (
                             %s, %s, %s, %s, NULL, NULL, true, true, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
-                        ON CONFLICT (job_history_id, ams_id, tray_id) DO UPDATE SET
+                        ON CONFLICT (job_history_id, COALESCE(ams_id, -1), COALESCE(tray_id, -1)) DO UPDATE SET
                             filament_id = EXCLUDED.filament_id,
                             tray_uuid = EXCLUDED.tray_uuid,
                             filament_name = EXCLUDED.filament_name,
@@ -876,9 +880,13 @@ class SafePrinterMonitor:
                             db_info.get('db_diameter') if db_info else active_filament_info.get('diameter')
                         )
                     )
+                    self.console.print(f"  [dim]DEBUG: UPSERT external spool filament[/]")
+                else:
+                    self.console.print(f"  [yellow]DEBUG _update_job_filaments: No active_filament_info for external spool[/]")
 
         except Exception as e:
             logging.error(f"Failed to update filaments for job {job_id}: {e}")
+            self.console.print(f"  [red]DEBUG _update_job_filaments exception: {e}[/]")
 
     def _update_filament_usage(self, job_id: int, status_data: Dict):
         """Update was_used flags during printing as tray_now changes."""
@@ -1135,7 +1143,7 @@ class SafePrinterMonitor:
                                     ) VALUES (
                                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                                     )
-                                    ON CONFLICT (job_history_id, ams_id, tray_id) DO NOTHING;
+                                    ON CONFLICT (job_history_id, COALESCE(ams_id, -1), COALESCE(tray_id, -1)) DO NOTHING;
                                     """,
                                     (
                                         job_id, printer_id,
@@ -1185,7 +1193,7 @@ class SafePrinterMonitor:
                         ) VALUES (
                             %s, %s, %s, %s, NULL, NULL, true, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                         )
-                        ON CONFLICT (job_history_id, ams_id, tray_id) DO NOTHING;
+                        ON CONFLICT (job_history_id, COALESCE(ams_id, -1), COALESCE(tray_id, -1)) DO NOTHING;
                         """,
                         (
                             job_id, printer_id,
@@ -1270,12 +1278,11 @@ class SafePrinterMonitor:
                 else:
                     interval_string = f"{remaining_seconds} seconds"
 
-            # Insert job start - let the database handle the timestamp to avoid timezone issues
-            # Use NOW() - interval to calculate start time based on elapsed seconds
+            # Insert job start - use LOCALTIMESTAMP to get local time for "timestamp without time zone" column
             result = self.db_manager.execute_query(
                 """
                 INSERT INTO printer_job_history (printer_id, filename, start_time, status, total_print_time)
-                VALUES (%s, %s, NOW() - (%s || ' seconds')::interval, %s, %s::interval) RETURNING id;
+                VALUES (%s, %s, LOCALTIMESTAMP - (%s || ' seconds')::interval, %s, %s::interval) RETURNING id;
                 """,
                 (manager.printer_id, gcode_file, elapsed_seconds, status, interval_string),
                 fetch=True
@@ -1293,7 +1300,7 @@ class SafePrinterMonitor:
         rows_updated = self.db_manager.execute_query(
             """
             UPDATE printer_job_history
-            SET end_time = NOW(), status = %s
+            SET end_time = LOCALTIMESTAMP, status = %s
             WHERE printer_id = %s AND filename = %s AND end_time IS NULL;
             """,
             (status, manager.printer_id, manager.previous_filename)
