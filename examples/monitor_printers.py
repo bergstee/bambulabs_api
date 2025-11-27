@@ -652,26 +652,25 @@ class SafePrinterMonitor:
     def _update_printer_database(self, manager, status, remaining_time_min, gcode_file, percentage):
         """Update printer status in database."""
         try:
-            now = datetime.datetime.now()  # Use local time since DB uses "timestamp without time zone"
             remaining_seconds = None
             if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
                 remaining_seconds = int(remaining_time_min * 60)
-            
+
             progress_float = None
             if isinstance(percentage, (int, float)) and 0 <= percentage <= 100:
                 progress_float = float(percentage)
-            
+
             self.db_manager.execute_query(
                 """
                 UPDATE printers
                 SET last_poll_status = %s,
-                    last_polled_at = %s,
+                    last_polled_at = NOW(),
                     remaining_time = %s,
                     current_print_job = %s,
                     Print_Progress = %s
                 WHERE printer_id = %s;
                 """,
-                (status, now, remaining_seconds, gcode_file if gcode_file != 'N/A' else None, 
+                (status, remaining_seconds, gcode_file if gcode_file != 'N/A' else None,
                  progress_float, manager.printer_id)
             )
         except Exception as e:
@@ -695,9 +694,12 @@ class SafePrinterMonitor:
                 self.console.print(f"  [dim]DEBUG: Detected job START (was_running={was_running}, is_running={is_running})[/]")
                 self._log_job_start(manager, status, gcode_file, remaining_time_min, percentage, status_data)
 
-            # During print: track filament usage changes
+            # During print: update filament records and track usage changes
             elif is_running and was_running and manager.current_job_id:
-                self.console.print(f"  [dim]DEBUG: Job RUNNING, calling _update_filament_usage (job_id={manager.current_job_id})[/]")
+                self.console.print(f"  [dim]DEBUG: Job RUNNING, updating filaments (job_id={manager.current_job_id})[/]")
+                # Update/create filament records on each cycle (handles AMS changes mid-print)
+                self._update_job_filaments(manager.current_job_id, manager.printer_id, status_data)
+                # Track which filaments are actively being used
                 self._update_filament_usage(manager.current_job_id, status_data)
 
             # Job end detection
@@ -710,6 +712,174 @@ class SafePrinterMonitor:
         except Exception as e:
             logging.error(f"Failed to log job event for {manager.name}: {e}")
     
+    def _update_job_filaments(self, job_id: int, printer_id: int, status_data: Dict):
+        """Update or create filament records for the current job on each cycle.
+
+        This ensures filament data stays current if AMS trays are swapped mid-print.
+        Uses UPSERT to update existing records or create new ones.
+        """
+        if not job_id:
+            return
+
+        try:
+            # Get the currently active filament (vt_tray)
+            active_filament_info = self._extract_filament_info(status_data)
+            active_tray_uuid = active_filament_info.get('tray_uuid') if active_filament_info else None
+
+            # Get AMS hub data for all loaded filaments
+            ams_hub = status_data.get('ams_hub')
+
+            if ams_hub:
+                # Printer has AMS - update all loaded filaments
+                for ams_id in range(4):  # Check up to 4 AMS units
+                    try:
+                        ams = ams_hub[ams_id]
+                        for tray_id in range(4):
+                            tray = ams.get_filament_tray(tray_id)
+                            if tray:
+                                tray_info_idx = getattr(tray, 'tray_info_idx', None)
+                                tray_uuid = getattr(tray, 'tray_uuid', None)
+
+                                # Look up database info
+                                db_info = None
+                                if tray_info_idx and tray_info_idx not in ['N/A', '']:
+                                    try:
+                                        result = self.db_manager.execute_query(
+                                            """
+                                            SELECT name, material_type, vendor, nozzle_temp_min, nozzle_temp_max,
+                                                   bed_temp, density, cost, diameter
+                                            FROM bambu_filament_profiles
+                                            WHERE filament_id = %s
+                                            """,
+                                            (tray_info_idx,),
+                                            fetch=True
+                                        )
+                                        if result and len(result) > 0:
+                                            db_info = {
+                                                'db_name': result[0][0],
+                                                'db_vendor': result[0][2],
+                                                'db_temp_min': result[0][3],
+                                                'db_temp_max': result[0][4],
+                                                'db_bed_temp': result[0][5],
+                                                'db_density': result[0][6],
+                                                'db_cost': result[0][7],
+                                                'db_diameter': result[0][8]
+                                            }
+                                    except Exception:
+                                        pass
+
+                                # Extract tray color
+                                tray_color_raw = getattr(tray, 'tray_color', None)
+                                tray_color = None
+                                if tray_color_raw and tray_color_raw not in ['N/A', ''] and len(tray_color_raw) == 8 and tray_color_raw.endswith('FF'):
+                                    tray_color = tray_color_raw[:-2]
+                                elif tray_color_raw and tray_color_raw not in ['N/A', '']:
+                                    tray_color = tray_color_raw
+
+                                is_primary = (tray_uuid == active_tray_uuid) if active_tray_uuid else False
+
+                                # UPSERT filament record - update if exists, insert if new
+                                self.db_manager.execute_query(
+                                    """
+                                    INSERT INTO printer_job_filaments (
+                                        job_history_id, printer_id, filament_id, tray_uuid,
+                                        ams_id, tray_id, is_primary, was_used,
+                                        filament_name, filament_type, filament_color,
+                                        filament_vendor, temp_min, temp_max, bed_temp,
+                                        weight, cost, density, diameter
+                                    ) VALUES (
+                                        %s, %s, %s, %s, %s, %s, %s, false, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                    )
+                                    ON CONFLICT (job_history_id, ams_id, tray_id) DO UPDATE SET
+                                        filament_id = EXCLUDED.filament_id,
+                                        tray_uuid = EXCLUDED.tray_uuid,
+                                        is_primary = EXCLUDED.is_primary,
+                                        filament_name = EXCLUDED.filament_name,
+                                        filament_type = EXCLUDED.filament_type,
+                                        filament_color = EXCLUDED.filament_color,
+                                        filament_vendor = EXCLUDED.filament_vendor,
+                                        temp_min = EXCLUDED.temp_min,
+                                        temp_max = EXCLUDED.temp_max,
+                                        bed_temp = EXCLUDED.bed_temp,
+                                        weight = EXCLUDED.weight,
+                                        cost = EXCLUDED.cost,
+                                        density = EXCLUDED.density,
+                                        diameter = EXCLUDED.diameter;
+                                    """,
+                                    (
+                                        job_id, printer_id,
+                                        tray_info_idx,
+                                        tray_uuid,
+                                        ams_id, tray_id, is_primary,
+                                        db_info.get('db_name') if db_info else None,
+                                        getattr(tray, 'tray_type', None),
+                                        tray_color,
+                                        db_info.get('db_vendor') if db_info else getattr(tray, 'tray_sub_brands', None),
+                                        getattr(tray, 'nozzle_temp_min', None),
+                                        getattr(tray, 'nozzle_temp_max', None),
+                                        getattr(tray, 'bed_temp', None),
+                                        getattr(tray, 'tray_weight', None),
+                                        db_info.get('db_cost') if db_info else None,
+                                        db_info.get('db_density') if db_info else None,
+                                        db_info.get('db_diameter') if db_info else getattr(tray, 'tray_diameter', None)
+                                    )
+                                )
+
+                    except KeyError:
+                        continue
+
+            else:
+                # No AMS - update external spool filament
+                if active_filament_info:
+                    db_info = active_filament_info.get('db_info', {}) or {}
+
+                    self.db_manager.execute_query(
+                        """
+                        INSERT INTO printer_job_filaments (
+                            job_history_id, printer_id, filament_id, tray_uuid,
+                            ams_id, tray_id, is_primary, was_used,
+                            filament_name, filament_type, filament_color,
+                            filament_vendor, temp_min, temp_max, bed_temp,
+                            weight, cost, density, diameter
+                        ) VALUES (
+                            %s, %s, %s, %s, NULL, NULL, true, true, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (job_history_id, ams_id, tray_id) DO UPDATE SET
+                            filament_id = EXCLUDED.filament_id,
+                            tray_uuid = EXCLUDED.tray_uuid,
+                            filament_name = EXCLUDED.filament_name,
+                            filament_type = EXCLUDED.filament_type,
+                            filament_color = EXCLUDED.filament_color,
+                            filament_vendor = EXCLUDED.filament_vendor,
+                            temp_min = EXCLUDED.temp_min,
+                            temp_max = EXCLUDED.temp_max,
+                            bed_temp = EXCLUDED.bed_temp,
+                            weight = EXCLUDED.weight,
+                            cost = EXCLUDED.cost,
+                            density = EXCLUDED.density,
+                            diameter = EXCLUDED.diameter;
+                        """,
+                        (
+                            job_id, printer_id,
+                            active_filament_info.get('tray_info_idx'),
+                            active_filament_info.get('tray_uuid'),
+                            db_info.get('db_name'),
+                            active_filament_info.get('type'),
+                            active_filament_info.get('color'),
+                            db_info.get('db_vendor') if db_info else active_filament_info.get('brand'),
+                            active_filament_info.get('temp_min'),
+                            active_filament_info.get('temp_max'),
+                            active_filament_info.get('bed_temp'),
+                            active_filament_info.get('weight'),
+                            db_info.get('db_cost'),
+                            db_info.get('db_density'),
+                            db_info.get('db_diameter') if db_info else active_filament_info.get('diameter')
+                        )
+                    )
+
+        except Exception as e:
+            logging.error(f"Failed to update filaments for job {job_id}: {e}")
+
     def _update_filament_usage(self, job_id: int, status_data: Dict):
         """Update was_used flags during printing as tray_now changes."""
         try:
@@ -1066,8 +1236,6 @@ class SafePrinterMonitor:
 
     def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start event."""
-        now = datetime.datetime.now()  # Use local time since DB uses "timestamp without time zone"
-
         # Check for existing unfinished job
         existing = self.db_manager.execute_query(
             """
@@ -1079,9 +1247,10 @@ class SafePrinterMonitor:
         )
 
         if existing and existing[0][0] == 0:
-            # Calculate estimated start time
-            actual_start_time = now
+            # Calculate estimated start time based on progress
+            # Use database's current timestamp to avoid timezone issues
             interval_string = None
+            elapsed_seconds = 0
 
             if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
                 remaining_seconds = int(remaining_time_min * 60)
@@ -1089,25 +1258,26 @@ class SafePrinterMonitor:
                     try:
                         estimated_total_seconds = int(float(remaining_seconds) * 100.0 / (100.0 - float(percentage)))
                         interval_string = f"{estimated_total_seconds} seconds"
-                        elapsed_seconds = (float(percentage) * float(remaining_seconds)) / (100.0 - float(percentage))
+                        elapsed_seconds = int((float(percentage) * float(remaining_seconds)) / (100.0 - float(percentage)))
                         # Sanity check: elapsed time should be positive and not exceed total estimated time
-                        if elapsed_seconds > 0 and elapsed_seconds < estimated_total_seconds:
-                            actual_start_time = now - datetime.timedelta(seconds=elapsed_seconds)
-                        else:
+                        if elapsed_seconds < 0 or elapsed_seconds >= estimated_total_seconds:
                             logging.warning(f"Invalid elapsed_seconds calculation: {elapsed_seconds}, using current time")
+                            elapsed_seconds = 0
                     except Exception as calc_error:
                         logging.warning(f"Error calculating start time: {calc_error}")
                         interval_string = f"{remaining_seconds} seconds"
+                        elapsed_seconds = 0
                 else:
                     interval_string = f"{remaining_seconds} seconds"
 
-            # Insert job start
+            # Insert job start - let the database handle the timestamp to avoid timezone issues
+            # Use NOW() - interval to calculate start time based on elapsed seconds
             result = self.db_manager.execute_query(
                 """
                 INSERT INTO printer_job_history (printer_id, filename, start_time, status, total_print_time)
-                VALUES (%s, %s, %s, %s, %s::interval) RETURNING id;
+                VALUES (%s, %s, NOW() - (%s || ' seconds')::interval, %s, %s::interval) RETURNING id;
                 """,
-                (manager.printer_id, gcode_file, actual_start_time, status, interval_string),
+                (manager.printer_id, gcode_file, elapsed_seconds, status, interval_string),
                 fetch=True
             )
 
@@ -1120,15 +1290,13 @@ class SafePrinterMonitor:
     
     def _log_job_end(self, manager, status):
         """Log job end event."""
-        now = datetime.datetime.now()  # Use local time since DB uses "timestamp without time zone"
-        
         rows_updated = self.db_manager.execute_query(
             """
             UPDATE printer_job_history
-            SET end_time = %s, status = %s
+            SET end_time = NOW(), status = %s
             WHERE printer_id = %s AND filename = %s AND end_time IS NULL;
             """,
-            (now, status, manager.printer_id, manager.previous_filename)
+            (status, manager.printer_id, manager.previous_filename)
         )
         
         if rows_updated > 0:
