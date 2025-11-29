@@ -211,12 +211,18 @@ class PrinterConnectionManager:
                 self.is_connected = False
 
     def _load_ongoing_job(self):
-        """Load any ongoing job from database on startup to track it properly."""
+        """Load any ongoing job from database on startup to track it properly.
+
+        Note: With bambu_job_id support, jobs are now matched by Bambu's unique job ID,
+        so this function is mainly for resuming tracking of jobs that were in progress
+        when the monitoring script was stopped. The actual job matching happens in
+        _log_job_start() using the bambu_job_id.
+        """
         try:
-            # Query for unfinished jobs for this printer
+            # Query for unfinished jobs for this printer (includes bambu_job_id for reference)
             result = self.db_manager.execute_query(
                 """
-                SELECT id, filename, start_time
+                SELECT id, filename, start_time, bambu_job_id
                 FROM printer_job_history
                 WHERE printer_id = %s
                   AND end_time IS NULL
@@ -228,13 +234,13 @@ class PrinterConnectionManager:
             )
 
             if result and len(result) > 0:
-                job_id, filename, start_time = result[0]
+                job_id, filename, start_time, bambu_job_id = result[0]
                 self.current_job_id = job_id
                 self.previous_filename = filename
                 self.previous_status = "RUNNING"  # Assume it's running since end_time is NULL
 
-                self.console.print(f"  [cyan]Loaded ongoing job:[/] ID={job_id}, File={filename}, Started={start_time}")
-                logging.info(f"Printer {self.name}: Loaded ongoing job ID {job_id} ({filename}) from database")
+                self.console.print(f"  [cyan]Loaded ongoing job:[/] ID={job_id}, Bambu={bambu_job_id}, File={filename}, Started={start_time}")
+                logging.info(f"Printer {self.name}: Loaded ongoing job ID {job_id} (Bambu: {bambu_job_id}, {filename}) from database")
 
                 # Check if filament info exists for this job
                 filament_count = self.db_manager.execute_query(
@@ -323,7 +329,9 @@ class PrinterConnectionManager:
                             'vt_tray': self._get_vt_tray_safe(),
                             'ams_hub': self._get_ams_hub_safe(),
                             'tray_now': ams_data.get('tray_now'),  # Active tray ID (from ams object)
-                            'tray_tar': ams_data.get('tray_tar')   # Target tray ID (from ams object)
+                            'tray_tar': ams_data.get('tray_tar'),  # Target tray ID (from ams object)
+                            'bambu_job_id': print_data.get('job_id'),  # Bambu's unique job ID - persists across pause/resume
+                            'subtask_name': print_data.get('subtask_name'),
                         }
                     except Exception as e:
                         error = e
@@ -660,17 +668,20 @@ class SafePrinterMonitor:
             if isinstance(percentage, (int, float)) and 0 <= percentage <= 100:
                 progress_float = float(percentage)
 
+            # Use Python datetime for timezone consistency
+            poll_time = datetime.datetime.now()
+
             self.db_manager.execute_query(
                 """
                 UPDATE printers
                 SET last_poll_status = %s,
-                    last_polled_at = LOCALTIMESTAMP,
+                    last_polled_at = %s,
                     remaining_time = %s,
                     current_print_job = %s,
                     Print_Progress = %s
                 WHERE printer_id = %s;
                 """,
-                (status, remaining_seconds, gcode_file if gcode_file != 'N/A' else None,
+                (status, poll_time, remaining_seconds, gcode_file if gcode_file != 'N/A' else None,
                  progress_float, manager.printer_id)
             )
         except Exception as e:
@@ -1257,21 +1268,59 @@ class SafePrinterMonitor:
 
     def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start event."""
-        # Check for existing unfinished job
+        # Get Bambu's job_id from MQTT data - this is the authoritative unique identifier
+        bambu_job_id = status_data.get('bambu_job_id')
+
+        if not bambu_job_id:
+            self.console.print(f"  [yellow]No bambu_job_id in status data, skipping job logging[/]")
+            return
+
+        # Check for existing job with this bambu_job_id (handles pause/resume and script restarts)
         existing = self.db_manager.execute_query(
             """
-            SELECT COUNT(*) FROM printer_job_history
-            WHERE printer_id = %s AND filename = %s AND end_time IS NULL;
+            SELECT id FROM printer_job_history
+            WHERE bambu_job_id = %s;
             """,
-            (manager.printer_id, gcode_file),
+            (bambu_job_id,),
             fetch=True
         )
 
-        if existing and existing[0][0] == 0:
-            # Calculate estimated start time based on progress
-            # Use database's current timestamp to avoid timezone issues
+        if existing and len(existing) > 0:
+            # Job already exists (was paused, resumed, or script restarted) - just load it
+            manager.current_job_id = existing[0][0]
+            self.console.print(f"  [yellow]Job RESUMED:[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
+
+            # Update status to RUNNING
+            self.db_manager.execute_query(
+                """
+                UPDATE printer_job_history
+                SET status = %s
+                WHERE id = %s;
+                """,
+                (status, manager.current_job_id)
+            )
+
+            # Backfill filaments if needed
+            filament_count = self.db_manager.execute_query(
+                """
+                SELECT COUNT(*) FROM printer_job_filaments
+                WHERE job_history_id = %s;
+                """,
+                (manager.current_job_id,),
+                fetch=True
+            )
+
+            if filament_count and filament_count[0][0] == 0:
+                self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
+
+        else:
+            # New job - calculate estimated start time based on progress
+            # Use Python's datetime for timezone handling instead of LOCALTIMESTAMP
             interval_string = None
             elapsed_seconds = 0
+
+            # Get current local time in Python
+            now = datetime.datetime.now()
 
             if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
                 remaining_seconds = int(remaining_time_min * 60)
@@ -1291,32 +1340,38 @@ class SafePrinterMonitor:
                 else:
                     interval_string = f"{remaining_seconds} seconds"
 
-            # Insert job start - use LOCALTIMESTAMP to get local time for "timestamp without time zone" column
+            # Calculate start time in Python to avoid timezone issues
+            start_time = now - datetime.timedelta(seconds=elapsed_seconds)
+
+            # Insert job start with bambu_job_id
             result = self.db_manager.execute_query(
                 """
-                INSERT INTO printer_job_history (printer_id, filename, start_time, status, total_print_time)
-                VALUES (%s, %s, LOCALTIMESTAMP - (%s || ' seconds')::interval, %s, %s::interval) RETURNING id;
+                INSERT INTO printer_job_history (printer_id, filename, start_time, status, total_print_time, bambu_job_id)
+                VALUES (%s, %s, %s, %s, %s::interval, %s) RETURNING id;
                 """,
-                (manager.printer_id, gcode_file, elapsed_seconds, status, interval_string),
+                (manager.printer_id, gcode_file, start_time, status, interval_string, bambu_job_id),
                 fetch=True
             )
 
             if result:
                 manager.current_job_id = result[0][0]
-                self.console.print(f"  [green]Job START:[/] {gcode_file} (ID: {manager.current_job_id})")
+                self.console.print(f"  [green]Job START:[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id}) at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
                 # Capture ALL filament information (supports multi-color prints)
                 self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
     
     def _log_job_end(self, manager, status):
         """Log job end event."""
+        # Use Python datetime for timezone consistency
+        end_time = datetime.datetime.now()
+
         rows_updated = self.db_manager.execute_query(
             """
             UPDATE printer_job_history
-            SET end_time = LOCALTIMESTAMP, status = %s
+            SET end_time = %s, status = %s
             WHERE printer_id = %s AND filename = %s AND end_time IS NULL;
             """,
-            (status, manager.printer_id, manager.previous_filename)
+            (end_time, status, manager.printer_id, manager.previous_filename)
         )
         
         if rows_updated > 0:
