@@ -914,6 +914,19 @@ class SafePrinterMonitor:
                 self.console.print(f"  [cyan]DEBUG: Decoded tray_now={tray_now_int} -> AMS {active_ams_id}, Tray {active_tray_id}[/]")
                 logging.info(f"Job {job_id}: Marking AMS {active_ams_id}, Tray {active_tray_id} as used (tray_now={tray_now_int})")
 
+                # First, check what filaments exist for this job
+                existing_filaments = self.db_manager.execute_query(
+                    """
+                    SELECT ams_id, tray_id, was_used, filament_name, filament_color
+                    FROM printer_job_filaments
+                    WHERE job_history_id = %s
+                    ORDER BY ams_id, tray_id;
+                    """,
+                    (job_id,),
+                    fetch=True
+                )
+                self.console.print(f"  [dim]DEBUG: Existing filaments for job {job_id}: {existing_filaments}[/]")
+
                 # Update was_used flag for this filament
                 self.console.print(f"  [dim]DEBUG: Running UPDATE query for job_id={job_id}, ams_id={active_ams_id}, tray_id={active_tray_id}[/]")
                 rows_affected = self.db_manager.execute_query(
