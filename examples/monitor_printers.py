@@ -432,7 +432,9 @@ class SafePrinterMonitor:
         self.running = True
         self.RETRY_INTERVAL_SECONDS = 60  # Retry every 60 seconds instead of 300
         self.last_retry_attempt_time = 0
-        
+        self.FULL_RECONNECT_INTERVAL = 300  # Full reconnect every 5 minutes
+        self.last_full_reconnect_time = time.time()
+
         # Set up logging
         self._setup_logging()
     
@@ -539,13 +541,19 @@ class SafePrinterMonitor:
                 
                 # Attempt to reconnect unreachable printers
                 self._retry_unreachable_printers()
-                
+
+                # Periodic full reconnect to refresh MQTT connections
+                self._periodic_full_reconnect()
+
                 # Status summary
                 self.console.print(f"\n[dim]Active: {len(self.printer_managers)} | Unreachable: {len(self.unreachable_printers)}[/]")
                 if self.unreachable_printers:
                     time_since_retry = time.time() - self.last_retry_attempt_time
                     next_retry_in = max(0, int(self.RETRY_INTERVAL_SECONDS - time_since_retry))
                     self.console.print(f"[dim]Next reconnect attempt in {next_retry_in}s[/]")
+                time_since_full_reconnect = time.time() - self.last_full_reconnect_time
+                next_full_reconnect_in = max(0, int(self.FULL_RECONNECT_INTERVAL - time_since_full_reconnect))
+                self.console.print(f"[dim]Next full reconnect in {next_full_reconnect_in}s[/]")
                 self.console.print(f"[dim]Next check in 10 seconds...[/]")
                 
                 # Health check interval
@@ -620,7 +628,48 @@ class SafePrinterMonitor:
 
         if reconnected:
             self.console.print(f"[green]Successfully reconnected {len(reconnected)} printer(s)[/]")
-    
+
+    def _periodic_full_reconnect(self):
+        """Perform a full reconnect of all printers every 5 minutes to refresh MQTT connections."""
+        current_time = time.time()
+        if current_time - self.last_full_reconnect_time < self.FULL_RECONNECT_INTERVAL:
+            return
+
+        self.last_full_reconnect_time = current_time
+        self.console.print(f"\n[bold blue]Performing full reconnect of all {len(self.printer_managers)} printers...[/]")
+
+        # Store printer info and disconnect all
+        printers_to_reconnect = []
+        for manager in self.printer_managers:
+            printers_to_reconnect.append((
+                manager.printer_id,
+                manager.name,
+                manager.ip,
+                manager.serial,
+                manager.access_code
+            ))
+            manager.disconnect()
+
+        self.printer_managers.clear()
+
+        # Reconnect all printers
+        reconnected_count = 0
+        for printer_id, name, ip, serial, access_code in printers_to_reconnect:
+            self.console.print(f"  [dim]Reconnecting to {name}...[/]")
+            manager = PrinterConnectionManager(
+                printer_id, name, ip, serial, access_code, self.db_manager, self.mqtt_logger
+            )
+
+            if manager.connect():
+                self.printer_managers.append(manager)
+                reconnected_count += 1
+                self.console.print(f"  [green]✓ {name} reconnected[/]")
+            else:
+                self.unreachable_printers.append((printer_id, name, ip, serial, access_code))
+                self.console.print(f"  [red]✗ {name} failed - moved to unreachable[/]")
+
+        self.console.print(f"[bold green]Full reconnect complete: {reconnected_count}/{len(printers_to_reconnect)} printers[/]")
+
     def _process_printer_status(self, manager: PrinterConnectionManager, status_data: Dict):
         """Process and display printer status."""
         try:
