@@ -188,11 +188,22 @@ class PrinterConnectionManager:
         param = '-n' if platform.system().lower() == 'windows' else '-c'
         command = ['ping', param, '1', self.ip]
         try:
+            # On Windows, use CREATE_NO_WINDOW flag to hide the console popup
+            startupinfo = None
+            creationflags = 0
+            if platform.system().lower() == 'windows':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                creationflags = subprocess.CREATE_NO_WINDOW
+
             response = subprocess.run(
-                command, 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.DEVNULL, 
-                timeout=3
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                startupinfo=startupinfo,
+                creationflags=creationflags
             )
             return response.returncode == 0
         except (subprocess.TimeoutExpired, Exception):
@@ -324,6 +335,17 @@ class PrinterConnectionManager:
                         print_data = raw_data.get('print', {})
                         ams_data = print_data.get('ams', {})
 
+                        # Get subtask_id - this is Bambu's unique job identifier
+                        # For cloud prints it's a large integer like 587508594
+                        # For local prints it may be "0" - we'll need to handle that
+                        subtask_id_raw = print_data.get('subtask_id')
+                        bambu_job_id = None
+                        if subtask_id_raw and subtask_id_raw != "0" and subtask_id_raw != 0:
+                            try:
+                                bambu_job_id = int(subtask_id_raw)
+                            except (ValueError, TypeError):
+                                pass
+
                         result = {
                             'status': self.client.get_state(),
                             'percentage': self.client.get_percentage(),
@@ -337,7 +359,7 @@ class PrinterConnectionManager:
                             'ams_hub': self._get_ams_hub_safe(),
                             'tray_now': ams_data.get('tray_now'),  # Active tray ID (from ams object)
                             'tray_tar': ams_data.get('tray_tar'),  # Target tray ID (from ams object)
-                            'bambu_job_id': print_data.get('job_id'),  # Bambu's unique job ID - persists across pause/resume
+                            'bambu_job_id': bambu_job_id,  # Bambu's unique job ID from subtask_id - persists across pause/resume
                             'subtask_name': print_data.get('subtask_name'),
                         }
                     except Exception as e:
@@ -408,7 +430,7 @@ class SafePrinterMonitor:
         self.printer_managers = []
         self.unreachable_printers = []
         self.running = True
-        self.RETRY_INTERVAL_SECONDS = 300
+        self.RETRY_INTERVAL_SECONDS = 60  # Retry every 60 seconds instead of 300
         self.last_retry_attempt_time = 0
         
         # Set up logging
@@ -520,6 +542,10 @@ class SafePrinterMonitor:
                 
                 # Status summary
                 self.console.print(f"\n[dim]Active: {len(self.printer_managers)} | Unreachable: {len(self.unreachable_printers)}[/]")
+                if self.unreachable_printers:
+                    time_since_retry = time.time() - self.last_retry_attempt_time
+                    next_retry_in = max(0, int(self.RETRY_INTERVAL_SECONDS - time_since_retry))
+                    self.console.print(f"[dim]Next reconnect attempt in {next_retry_in}s[/]")
                 self.console.print(f"[dim]Next check in 10 seconds...[/]")
                 
                 # Health check interval
@@ -569,23 +595,31 @@ class SafePrinterMonitor:
             return
         
         self.last_retry_attempt_time = current_time
-        self.console.print(f"[blue]Retrying {len(self.unreachable_printers)} unreachable printers...[/]")
-        
+        unreachable_names = [p[1] for p in self.unreachable_printers]
+        self.console.print(f"[blue]Retrying {len(self.unreachable_printers)} unreachable printers: {', '.join(unreachable_names)}[/]")
+
         reconnected = []
         for printer_data in self.unreachable_printers:
             printer_id, name, ip, serial, access_code = printer_data
+            self.console.print(f"  [dim]Attempting to reconnect to {name} ({ip})...[/]")
+
             manager = PrinterConnectionManager(
                 printer_id, name, ip, serial, access_code, self.db_manager, self.mqtt_logger
             )
-            
+
             if manager.connect():
                 self.printer_managers.append(manager)
                 reconnected.append(printer_data)
-                self.console.print(f"[green]Reconnected to {name}[/]")
-        
+                self.console.print(f"  [green]✓ Reconnected to {name}[/]")
+            else:
+                self.console.print(f"  [yellow]✗ Failed to reconnect to {name} - will retry in {self.RETRY_INTERVAL_SECONDS}s[/]")
+
         # Remove reconnected printers from unreachable list
         for printer_data in reconnected:
             self.unreachable_printers.remove(printer_data)
+
+        if reconnected:
+            self.console.print(f"[green]Successfully reconnected {len(reconnected)} printer(s)[/]")
     
     def _process_printer_status(self, manager: PrinterConnectionManager, status_data: Dict):
         """Process and display printer status."""
@@ -768,9 +802,13 @@ class SafePrinterMonitor:
             active_filament_info = self._extract_filament_info(status_data)
             active_tray_uuid = active_filament_info.get('tray_uuid') if active_filament_info else None
 
+            # Get tray_now to identify filament source
+            # tray_now values: 0-15 = AMS tray, 254/255 = external spool
+            tray_now = status_data.get('tray_now')
+
             # Get AMS hub data for all loaded filaments
             ams_hub = status_data.get('ams_hub')
-            self.console.print(f"  [dim]DEBUG _update_job_filaments: job_id={job_id}, ams_hub={'present' if ams_hub else 'None'}[/]")
+            self.console.print(f"  [dim]DEBUG _update_job_filaments: job_id={job_id}, ams_hub={'present' if ams_hub else 'None'}, tray_now={tray_now}[/]")
 
             if ams_hub:
                 # Printer has AMS - update all loaded filaments
@@ -873,9 +911,19 @@ class SafePrinterMonitor:
                         continue
 
             else:
-                # No AMS - update external spool filament
-                self.console.print(f"  [dim]DEBUG _update_job_filaments: No AMS hub, checking for external spool[/]")
-                if active_filament_info:
+                # No AMS hub data - but only update external spool if tray_now confirms it
+                # This prevents logging external spool when AMS is present but ams_hub is temporarily unavailable
+                is_external_spool = False
+                if tray_now is not None:
+                    tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+                    is_external_spool = tray_now_int in [254, 255]
+                else:
+                    # If tray_now is unknown, assume external spool for printers without AMS
+                    is_external_spool = True
+
+                self.console.print(f"  [dim]DEBUG _update_job_filaments: No AMS hub, is_external_spool={is_external_spool}[/]")
+
+                if is_external_spool and active_filament_info:
                     db_info = active_filament_info.get('db_info', {}) or {}
 
                     self.db_manager.execute_query(
@@ -922,6 +970,8 @@ class SafePrinterMonitor:
                         )
                     )
                     self.console.print(f"  [dim]DEBUG: UPSERT external spool filament[/]")
+                elif not is_external_spool:
+                    self.console.print(f"  [yellow]DEBUG: tray_now={tray_now} indicates AMS tray but no AMS hub data - skipping external spool update[/]")
                 else:
                     self.console.print(f"  [yellow]DEBUG _update_job_filaments: No active_filament_info for external spool[/]")
 
@@ -1071,7 +1121,18 @@ class SafePrinterMonitor:
                     pass
 
             # Only create filament info if we have meaningful data
-            if tray_type and tray_type not in ['N/A', ''] and (temp_min > 0 or temp_max > 0 or db_info or (tray_color and tray_color not in ['000000', '00000000'])):
+            # We now accept any filament with a valid type and either:
+            # - temperature data (min or max > 0)
+            # - database lookup info
+            # - a tray_info_idx (e.g., GFA02, GFL99)
+            # - a valid color (including black 000000)
+            has_meaningful_data = (
+                (temp_min > 0 or temp_max > 0) or
+                db_info or
+                (tray_info_idx and tray_info_idx not in ['N/A', '', 'GFL99']) or  # GFL99 is often placeholder
+                (tray_color and tray_color not in ['00000000'])  # Only reject fully transparent
+            )
+            if tray_type and tray_type not in ['N/A', ''] and has_meaningful_data:
                 return {
                     'type': tray_type,
                     'color': tray_color,
@@ -1229,8 +1290,18 @@ class SafePrinterMonitor:
                         continue
 
             else:
-                # No AMS - capture single external spool filament
-                if active_filament_info:
+                # No AMS hub data - but only log external spool if tray_now confirms it
+                # This prevents logging external spool when AMS is present but ams_hub is temporarily unavailable
+                # tray_now values: 0-15 = AMS tray, 254/255 = external spool
+                is_external_spool = False
+                if tray_now is not None:
+                    tray_now_int = int(tray_now) if isinstance(tray_now, str) else tray_now
+                    is_external_spool = tray_now_int in [254, 255]
+                else:
+                    # If tray_now is unknown, assume external spool for printers without AMS
+                    is_external_spool = True
+
+                if is_external_spool and active_filament_info:
                     db_info = active_filament_info.get('db_info', {}) or {}
 
                     # External spool is always considered "used" if it's active
@@ -1272,6 +1343,8 @@ class SafePrinterMonitor:
                     filament_desc = f"{filament_type} ({active_filament_info.get('color', 'no color')})"
                     filaments_captured.append(filament_desc)
                     filaments_used.append(filament_desc)
+                elif not is_external_spool:
+                    self.console.print(f"  [yellow]DEBUG: tray_now={tray_now} indicates AMS tray but no AMS hub data - skipping external spool logging[/]")
 
             # Display captured filaments with detailed info
             if filaments_captured:
@@ -1298,62 +1371,84 @@ class SafePrinterMonitor:
 
     def _log_job_start(self, manager, status, gcode_file, remaining_time_min, percentage, status_data: Dict):
         """Log job start event."""
-        # Get Bambu's job_id from MQTT data - this is the authoritative unique identifier
+        # Get Bambu's job_id from MQTT data - this is the authoritative unique identifier for cloud prints
+        # For local prints (subtask_id = "0"), bambu_job_id will be None
         bambu_job_id = status_data.get('bambu_job_id')
 
-        if not bambu_job_id:
-            self.console.print(f"  [yellow]No bambu_job_id in status data, skipping job logging[/]")
-            return
+        existing = None
 
-        # Check for existing job with this bambu_job_id (handles pause/resume and script restarts)
-        existing = self.db_manager.execute_query(
-            """
-            SELECT id FROM printer_job_history
-            WHERE bambu_job_id = %s;
-            """,
-            (bambu_job_id,),
-            fetch=True
-        )
-
-        if existing and len(existing) > 0:
-            # Job already exists with bambu_job_id - just load it
-            manager.current_job_id = existing[0][0]
-            self.console.print(f"  [yellow]Job RESUMED:[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
-
-            # Update status to RUNNING
-            self.db_manager.execute_query(
-                """
-                UPDATE printer_job_history
-                SET status = %s
-                WHERE id = %s;
-                """,
-                (status, manager.current_job_id)
-            )
-        else:
-            # No existing job with this bambu_job_id - check for legacy record or create new
-            legacy_existing = self.db_manager.execute_query(
+        # For cloud prints (with bambu_job_id), check for existing job by bambu_job_id
+        if bambu_job_id:
+            existing = self.db_manager.execute_query(
                 """
                 SELECT id FROM printer_job_history
-                WHERE printer_id = %s AND filename = %s AND end_time IS NULL AND bambu_job_id IS NULL;
+                WHERE bambu_job_id = %s;
                 """,
-                (manager.printer_id, gcode_file),
+                (bambu_job_id,),
                 fetch=True
             )
 
-            if legacy_existing and len(legacy_existing) > 0:
-                # Found a legacy record - backfill the bambu_job_id
-                manager.current_job_id = legacy_existing[0][0]
-                self.console.print(f"  [cyan]Job RECOVERED (backfilling bambu_job_id):[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
+            if existing and len(existing) > 0:
+                # Job already exists with bambu_job_id - just load it (pause/resume case)
+                manager.current_job_id = existing[0][0]
+                self.console.print(f"  [yellow]Job RESUMED (cloud):[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
 
-                # Update the record with bambu_job_id
+                # Update status to RUNNING
                 self.db_manager.execute_query(
                     """
                     UPDATE printer_job_history
-                    SET status = %s, bambu_job_id = %s
+                    SET status = %s
                     WHERE id = %s;
                     """,
-                    (status, bambu_job_id, manager.current_job_id)
+                    (status, manager.current_job_id)
                 )
+                return
+
+        # Check for existing unfinished job on this printer with same filename (handles local prints and legacy records)
+        # This also catches cloud prints that don't have bambu_job_id yet in DB
+        legacy_existing = self.db_manager.execute_query(
+            """
+            SELECT id, bambu_job_id FROM printer_job_history
+            WHERE printer_id = %s AND filename = %s AND end_time IS NULL
+            ORDER BY start_time DESC
+            LIMIT 1;
+            """,
+            (manager.printer_id, gcode_file),
+            fetch=True
+        )
+
+        if legacy_existing and len(legacy_existing) > 0:
+            existing_id, existing_bambu_job_id = legacy_existing[0]
+
+            # If the existing record has a different bambu_job_id, it's a different job - don't reuse
+            if existing_bambu_job_id and bambu_job_id and existing_bambu_job_id != bambu_job_id:
+                self.console.print(f"  [dim]DEBUG: Found unfinished job {existing_id} but different bambu_job_id ({existing_bambu_job_id} != {bambu_job_id}), creating new[/]")
+            else:
+                # Reuse the existing record
+                manager.current_job_id = existing_id
+
+                if bambu_job_id and not existing_bambu_job_id:
+                    # Backfill bambu_job_id if we have one now
+                    self.console.print(f"  [cyan]Job RECOVERED (backfilling bambu_job_id):[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
+                    self.db_manager.execute_query(
+                        """
+                        UPDATE printer_job_history
+                        SET status = %s, bambu_job_id = %s
+                        WHERE id = %s;
+                        """,
+                        (status, bambu_job_id, manager.current_job_id)
+                    )
+                else:
+                    job_type = "cloud" if bambu_job_id else "local"
+                    self.console.print(f"  [yellow]Job RESUMED ({job_type}):[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
+                    self.db_manager.execute_query(
+                        """
+                        UPDATE printer_job_history
+                        SET status = %s
+                        WHERE id = %s;
+                        """,
+                        (status, manager.current_job_id)
+                    )
 
                 # Backfill filaments if needed
                 filament_count = self.db_manager.execute_query(
@@ -1368,51 +1463,53 @@ class SafePrinterMonitor:
                 if filament_count and filament_count[0][0] == 0:
                     self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
 
+                return
+
+        # New job - calculate estimated start time based on progress
+        interval_string = None
+        elapsed_seconds = 0
+
+        # Get current local time in Python
+        now = datetime.datetime.now()
+
+        if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
+            remaining_seconds = int(remaining_time_min * 60)
+            if isinstance(percentage, (int, float)) and 0 < percentage < 100:
+                try:
+                    estimated_total_seconds = int(float(remaining_seconds) * 100.0 / (100.0 - float(percentage)))
+                    interval_string = f"{estimated_total_seconds} seconds"
+                    elapsed_seconds = int((float(percentage) * float(remaining_seconds)) / (100.0 - float(percentage)))
+                    # Sanity check: elapsed time should be positive and not exceed total estimated time
+                    if elapsed_seconds < 0 or elapsed_seconds >= estimated_total_seconds:
+                        logging.warning(f"Invalid elapsed_seconds calculation: {elapsed_seconds}, using current time")
+                        elapsed_seconds = 0
+                except Exception as calc_error:
+                    logging.warning(f"Error calculating start time: {calc_error}")
+                    interval_string = f"{remaining_seconds} seconds"
+                    elapsed_seconds = 0
             else:
-                # New job - calculate estimated start time based on progress
-                interval_string = None
-                elapsed_seconds = 0
+                interval_string = f"{remaining_seconds} seconds"
 
-                # Get current local time in Python
-                now = datetime.datetime.now()
+        # Calculate start time in Python to avoid timezone issues
+        start_time = now - datetime.timedelta(seconds=elapsed_seconds)
 
-                if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
-                    remaining_seconds = int(remaining_time_min * 60)
-                    if isinstance(percentage, (int, float)) and 0 < percentage < 100:
-                        try:
-                            estimated_total_seconds = int(float(remaining_seconds) * 100.0 / (100.0 - float(percentage)))
-                            interval_string = f"{estimated_total_seconds} seconds"
-                            elapsed_seconds = int((float(percentage) * float(remaining_seconds)) / (100.0 - float(percentage)))
-                            # Sanity check: elapsed time should be positive and not exceed total estimated time
-                            if elapsed_seconds < 0 or elapsed_seconds >= estimated_total_seconds:
-                                logging.warning(f"Invalid elapsed_seconds calculation: {elapsed_seconds}, using current time")
-                                elapsed_seconds = 0
-                        except Exception as calc_error:
-                            logging.warning(f"Error calculating start time: {calc_error}")
-                            interval_string = f"{remaining_seconds} seconds"
-                            elapsed_seconds = 0
-                    else:
-                        interval_string = f"{remaining_seconds} seconds"
+        # Insert job start with bambu_job_id (may be None for local prints)
+        job_type = "cloud" if bambu_job_id else "local"
+        result = self.db_manager.execute_query(
+            """
+            INSERT INTO printer_job_history (printer_id, filename, start_time, status, total_print_time, bambu_job_id)
+            VALUES (%s, %s, %s, %s, %s::interval, %s) RETURNING id;
+            """,
+            (manager.printer_id, gcode_file, start_time, status, interval_string, bambu_job_id),
+            fetch=True
+        )
 
-                # Calculate start time in Python to avoid timezone issues
-                start_time = now - datetime.timedelta(seconds=elapsed_seconds)
+        if result:
+            manager.current_job_id = result[0][0]
+            self.console.print(f"  [green]Job START ({job_type}):[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id}) at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
-                # Insert job start with bambu_job_id
-                result = self.db_manager.execute_query(
-                    """
-                    INSERT INTO printer_job_history (printer_id, filename, start_time, status, total_print_time, bambu_job_id)
-                    VALUES (%s, %s, %s, %s, %s::interval, %s) RETURNING id;
-                    """,
-                    (manager.printer_id, gcode_file, start_time, status, interval_string, bambu_job_id),
-                    fetch=True
-                )
-
-                if result:
-                    manager.current_job_id = result[0][0]
-                    self.console.print(f"  [green]Job START:[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id}) at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-
-                    # Capture ALL filament information (supports multi-color prints)
-                    self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
+            # Capture ALL filament information (supports multi-color prints)
+            self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
     
     def _log_job_end(self, manager, status):
         """Log job end event."""
