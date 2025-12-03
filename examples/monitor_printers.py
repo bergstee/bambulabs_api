@@ -638,35 +638,54 @@ class SafePrinterMonitor:
         self.last_full_reconnect_time = current_time
         self.console.print(f"\n[bold blue]Performing full reconnect of all {len(self.printer_managers)} printers...[/]")
 
-        # Store printer info and disconnect all
+        # Store printer info AND job state before disconnecting
         printers_to_reconnect = []
         for manager in self.printer_managers:
-            printers_to_reconnect.append((
-                manager.printer_id,
-                manager.name,
-                manager.ip,
-                manager.serial,
-                manager.access_code
-            ))
+            printers_to_reconnect.append({
+                'printer_id': manager.printer_id,
+                'name': manager.name,
+                'ip': manager.ip,
+                'serial': manager.serial,
+                'access_code': manager.access_code,
+                # Preserve job tracking state
+                'current_job_id': manager.current_job_id,
+                'previous_status': manager.previous_status,
+                'previous_filename': manager.previous_filename,
+                'needs_filament_backfill': manager.needs_filament_backfill,
+                'needs_bambu_job_id_backfill': manager.needs_bambu_job_id_backfill,
+            })
             manager.disconnect()
 
         self.printer_managers.clear()
 
         # Reconnect all printers
         reconnected_count = 0
-        for printer_id, name, ip, serial, access_code in printers_to_reconnect:
-            self.console.print(f"  [dim]Reconnecting to {name}...[/]")
+        for printer_info in printers_to_reconnect:
+            self.console.print(f"  [dim]Reconnecting to {printer_info['name']}...[/]")
             manager = PrinterConnectionManager(
-                printer_id, name, ip, serial, access_code, self.db_manager, self.mqtt_logger
+                printer_info['printer_id'], printer_info['name'], printer_info['ip'],
+                printer_info['serial'], printer_info['access_code'], self.db_manager, self.mqtt_logger
             )
 
             if manager.connect():
+                # Restore job tracking state (don't let _load_ongoing_job override if we have state)
+                if printer_info['current_job_id'] is not None:
+                    manager.current_job_id = printer_info['current_job_id']
+                    manager.previous_status = printer_info['previous_status']
+                    manager.previous_filename = printer_info['previous_filename']
+                    manager.needs_filament_backfill = printer_info['needs_filament_backfill']
+                    manager.needs_bambu_job_id_backfill = printer_info['needs_bambu_job_id_backfill']
+                    self.console.print(f"    [cyan]Restored job state: ID={manager.current_job_id}, status={manager.previous_status}[/]")
+
                 self.printer_managers.append(manager)
                 reconnected_count += 1
-                self.console.print(f"  [green]✓ {name} reconnected[/]")
+                self.console.print(f"  [green]✓ {printer_info['name']} reconnected[/]")
             else:
-                self.unreachable_printers.append((printer_id, name, ip, serial, access_code))
-                self.console.print(f"  [red]✗ {name} failed - moved to unreachable[/]")
+                self.unreachable_printers.append((
+                    printer_info['printer_id'], printer_info['name'], printer_info['ip'],
+                    printer_info['serial'], printer_info['access_code']
+                ))
+                self.console.print(f"  [red]✗ {printer_info['name']} failed - moved to unreachable[/]")
 
         self.console.print(f"[bold green]Full reconnect complete: {reconnected_count}/{len(printers_to_reconnect)} printers[/]")
 
@@ -826,10 +845,22 @@ class SafePrinterMonitor:
                 # Track which filaments are actively being used
                 self._update_filament_usage(manager.current_job_id, status_data)
 
-            # Job end detection
+            # Job end detection - multiple scenarios
+            # Scenario 1: Normal transition from RUNNING to non-RUNNING (in-memory state available)
             elif was_running and not is_running and manager.previous_filename and manager.previous_filename != 'N/A':
                 self.console.print(f"  [dim]DEBUG: Detected job END (was_running={was_running}, is_running={is_running})[/]")
-                self._log_job_end(manager, status)
+                self._log_job_end(manager, status, manager.previous_filename)
+
+            # Scenario 2: We have a current_job_id but status is no longer RUNNING
+            # This handles cases where in-memory was_running state was lost (e.g., after reconnect)
+            elif not is_running and manager.current_job_id is not None:
+                self.console.print(f"  [dim]DEBUG: Detected job END by current_job_id (job_id={manager.current_job_id}, status={status})[/]")
+                self._log_job_end_by_id(manager, status)
+
+            # Scenario 3: Not running, no in-memory job, but check DB for any orphaned running jobs
+            elif not is_running and status in ['FINISH', 'FAILED', 'IDLE']:
+                # Check if there are any unfinished jobs in the database for this printer
+                self._close_orphaned_jobs(manager, status)
             else:
                 self.console.print(f"  [dim]DEBUG: No job event triggered (is_running={is_running}, was_running={was_running}, current_job_id={manager.current_job_id})[/]")
 
@@ -1514,6 +1545,79 @@ class SafePrinterMonitor:
 
                 return
 
+        # For local prints without bambu_job_id, also check for recently ended jobs that might be the same print
+        # This handles reconnect scenarios where the job was incorrectly marked as ended
+        if not bambu_job_id:
+            # Calculate expected start time based on current progress
+            expected_start_time = datetime.datetime.now()
+            if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
+                if isinstance(percentage, (int, float)) and 0 < percentage < 100:
+                    try:
+                        remaining_seconds = int(remaining_time_min * 60)
+                        elapsed_seconds = int((float(percentage) * float(remaining_seconds)) / (100.0 - float(percentage)))
+                        expected_start_time = datetime.datetime.now() - datetime.timedelta(seconds=elapsed_seconds)
+                    except Exception:
+                        pass
+
+            # Look for a recent job with same filename that started around the expected time (within 10 minutes)
+            recent_job = self.db_manager.execute_query(
+                """
+                SELECT id, bambu_job_id, start_time, end_time, status FROM printer_job_history
+                WHERE printer_id = %s
+                  AND filename = %s
+                  AND start_time > %s - INTERVAL '10 minutes'
+                  AND start_time < %s + INTERVAL '10 minutes'
+                ORDER BY start_time DESC
+                LIMIT 1;
+                """,
+                (manager.printer_id, gcode_file, expected_start_time, expected_start_time),
+                fetch=True
+            )
+
+            if recent_job and len(recent_job) > 0:
+                existing_id, existing_bambu_job_id, existing_start, existing_end, existing_status = recent_job[0]
+
+                # Don't reuse if it has a different bambu_job_id
+                if not (existing_bambu_job_id and bambu_job_id and existing_bambu_job_id != bambu_job_id):
+                    manager.current_job_id = existing_id
+
+                    # If it was incorrectly ended, reopen it
+                    if existing_end is not None:
+                        self.console.print(f"  [cyan]Job REOPENED (local):[/] {gcode_file} (ID: {manager.current_job_id}, was {existing_status})")
+                        self.db_manager.execute_query(
+                            """
+                            UPDATE printer_job_history
+                            SET status = %s, end_time = NULL
+                            WHERE id = %s;
+                            """,
+                            (status, manager.current_job_id)
+                        )
+                    else:
+                        self.console.print(f"  [yellow]Job RESUMED (local, by time match):[/] {gcode_file} (ID: {manager.current_job_id})")
+                        self.db_manager.execute_query(
+                            """
+                            UPDATE printer_job_history
+                            SET status = %s
+                            WHERE id = %s;
+                            """,
+                            (status, manager.current_job_id)
+                        )
+
+                    # Backfill filaments if needed
+                    filament_count = self.db_manager.execute_query(
+                        """
+                        SELECT COUNT(*) FROM printer_job_filaments
+                        WHERE job_history_id = %s;
+                        """,
+                        (manager.current_job_id,),
+                        fetch=True
+                    )
+
+                    if filament_count and filament_count[0][0] == 0:
+                        self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
+
+                    return
+
         # New job - calculate estimated start time based on progress
         interval_string = None
         elapsed_seconds = 0
@@ -1560,8 +1664,8 @@ class SafePrinterMonitor:
             # Capture ALL filament information (supports multi-color prints)
             self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
     
-    def _log_job_end(self, manager, status):
-        """Log job end event."""
+    def _log_job_end(self, manager, status, filename):
+        """Log job end event by filename."""
         # Use Python datetime for timezone consistency
         end_time = datetime.datetime.now()
 
@@ -1571,14 +1675,81 @@ class SafePrinterMonitor:
             SET end_time = %s, status = %s
             WHERE printer_id = %s AND filename = %s AND end_time IS NULL;
             """,
-            (end_time, status, manager.printer_id, manager.previous_filename)
+            (end_time, status, manager.printer_id, filename)
         )
-        
+
         if rows_updated > 0:
-            self.console.print(f"  [blue]Job END:[/] {manager.previous_filename} - {status}")
+            self.console.print(f"  [blue]Job END:[/] {filename} - {status}")
             if status == "FINISH":
                 self.console.print(f"  [green]Job completed successfully[/]")
             manager.current_job_id = None
+
+    def _log_job_end_by_id(self, manager, status):
+        """Log job end event using current_job_id directly (more reliable than filename matching)."""
+        if not manager.current_job_id:
+            return
+
+        end_time = datetime.datetime.now()
+
+        # Get job info before updating
+        job_info = self.db_manager.execute_query(
+            """
+            SELECT filename, end_time FROM printer_job_history
+            WHERE id = %s;
+            """,
+            (manager.current_job_id,),
+            fetch=True
+        )
+
+        if job_info and len(job_info) > 0:
+            filename, existing_end_time = job_info[0]
+
+            # Only update if job hasn't already been ended
+            if existing_end_time is None:
+                self.db_manager.execute_query(
+                    """
+                    UPDATE printer_job_history
+                    SET end_time = %s, status = %s
+                    WHERE id = %s AND end_time IS NULL;
+                    """,
+                    (end_time, status, manager.current_job_id)
+                )
+                self.console.print(f"  [blue]Job END (by ID):[/] {filename} - {status} (ID: {manager.current_job_id})")
+                if status == "FINISH":
+                    self.console.print(f"  [green]Job completed successfully[/]")
+            else:
+                self.console.print(f"  [dim]Job {manager.current_job_id} already ended, skipping[/]")
+
+        manager.current_job_id = None
+
+    def _close_orphaned_jobs(self, manager, status):
+        """Close any orphaned (unfinished) jobs for this printer when printer is idle/finished."""
+        end_time = datetime.datetime.now()
+
+        # Find all unfinished jobs for this printer
+        orphaned_jobs = self.db_manager.execute_query(
+            """
+            SELECT id, filename FROM printer_job_history
+            WHERE printer_id = %s AND end_time IS NULL
+            ORDER BY start_time DESC;
+            """,
+            (manager.printer_id,),
+            fetch=True
+        )
+
+        if orphaned_jobs and len(orphaned_jobs) > 0:
+            for job_id, filename in orphaned_jobs:
+                self.db_manager.execute_query(
+                    """
+                    UPDATE printer_job_history
+                    SET end_time = %s, status = %s
+                    WHERE id = %s;
+                    """,
+                    (end_time, status, job_id)
+                )
+                self.console.print(f"  [yellow]Closed orphaned job:[/] {filename} - {status} (ID: {job_id})")
+                if status == "FINISH":
+                    self.console.print(f"  [green]Job completed successfully[/]")
     
     def shutdown(self):
         """Clean shutdown of all connections."""
