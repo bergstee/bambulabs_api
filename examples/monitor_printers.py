@@ -846,18 +846,18 @@ class SafePrinterMonitor:
                 self._update_filament_usage(manager.current_job_id, status_data)
 
             # Job end detection - multiple scenarios
-            # Scenario 1: Normal transition from RUNNING to non-RUNNING (in-memory state available)
-            elif was_running and not is_running and manager.previous_filename and manager.previous_filename != 'N/A':
-                self.console.print(f"  [dim]DEBUG: Detected job END (was_running={was_running}, is_running={is_running})[/]")
-                self._log_job_end(manager, status, manager.previous_filename)
-
-            # Scenario 2: We have a current_job_id but status is no longer RUNNING
-            # This handles cases where in-memory was_running state was lost (e.g., after reconnect)
+            # Scenario 1: Normal transition from RUNNING to non-RUNNING with current_job_id
+            # This is the most reliable - we have the job ID tracked
             elif not is_running and manager.current_job_id is not None:
-                self.console.print(f"  [dim]DEBUG: Detected job END by current_job_id (job_id={manager.current_job_id}, status={status})[/]")
+                self.console.print(f"  [dim]DEBUG: Detected job END (job_id={manager.current_job_id}, status={status})[/]")
                 self._log_job_end_by_id(manager, status)
 
-            # Scenario 3: Not running, no in-memory job, but check DB for any orphaned running jobs
+            # Scenario 2: Transition from RUNNING to non-RUNNING but no current_job_id (fallback by filename)
+            elif was_running and not is_running and manager.previous_filename and manager.previous_filename != 'N/A':
+                self.console.print(f"  [dim]DEBUG: Detected job END by filename (was_running={was_running}, status={status})[/]")
+                self._log_job_end(manager, status, manager.previous_filename)
+
+            # Scenario 3: Not running, check DB for any orphaned running jobs
             elif not is_running and status in ['FINISH', 'FAILED', 'IDLE']:
                 # Check if there are any unfinished jobs in the database for this printer
                 self._close_orphaned_jobs(manager, status)
@@ -1473,11 +1473,11 @@ class SafePrinterMonitor:
                 manager.current_job_id = existing[0][0]
                 self.console.print(f"  [yellow]Job RESUMED (cloud):[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
 
-                # Update status to RUNNING
+                # Update status to RUNNING and clear end_time (job is running again)
                 self.db_manager.execute_query(
                     """
                     UPDATE printer_job_history
-                    SET status = %s
+                    SET status = %s, end_time = NULL
                     WHERE id = %s;
                     """,
                     (status, manager.current_job_id)
@@ -1513,7 +1513,7 @@ class SafePrinterMonitor:
                     self.db_manager.execute_query(
                         """
                         UPDATE printer_job_history
-                        SET status = %s, bambu_job_id = %s
+                        SET status = %s, bambu_job_id = %s, end_time = NULL
                         WHERE id = %s;
                         """,
                         (status, bambu_job_id, manager.current_job_id)
@@ -1521,6 +1521,77 @@ class SafePrinterMonitor:
                 else:
                     job_type = "cloud" if bambu_job_id else "local"
                     self.console.print(f"  [yellow]Job RESUMED ({job_type}):[/] {gcode_file} (ID: {manager.current_job_id}, Bambu: {bambu_job_id})")
+                    self.db_manager.execute_query(
+                        """
+                        UPDATE printer_job_history
+                        SET status = %s, end_time = NULL
+                        WHERE id = %s;
+                        """,
+                        (status, manager.current_job_id)
+                    )
+
+                # Backfill filaments if needed
+                filament_count = self.db_manager.execute_query(
+                    """
+                    SELECT COUNT(*) FROM printer_job_filaments
+                    WHERE job_history_id = %s;
+                    """,
+                    (manager.current_job_id,),
+                    fetch=True
+                )
+
+                if filament_count and filament_count[0][0] == 0:
+                    self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
+
+                return
+
+        # For local prints without bambu_job_id, also check for recently ended jobs that might be the same print
+        # This handles reconnect scenarios where the job was incorrectly marked as ended
+        # Use a simpler approach: find the most recent job for this printer/filename and reuse it
+        # if it was started within the last 24 hours (reasonable max print time)
+        recent_job = self.db_manager.execute_query(
+            """
+            SELECT id, bambu_job_id, start_time, end_time, status FROM printer_job_history
+            WHERE printer_id = %s
+              AND filename = %s
+              AND start_time > NOW() - INTERVAL '24 hours'
+            ORDER BY start_time DESC
+            LIMIT 1;
+            """,
+            (manager.printer_id, gcode_file),
+            fetch=True
+        )
+
+        if recent_job and len(recent_job) > 0:
+            existing_id, existing_bambu_job_id, existing_start, existing_end, existing_status = recent_job[0]
+
+            # Don't reuse if:
+            # 1. It has a different bambu_job_id than what we have (different cloud job)
+            # 2. It already finished successfully (FINISH status) - that was a completed print
+            should_reuse = True
+            if existing_bambu_job_id and bambu_job_id and existing_bambu_job_id != bambu_job_id:
+                should_reuse = False
+                self.console.print(f"  [dim]DEBUG: Not reusing job {existing_id} - different bambu_job_id[/]")
+            elif existing_status == 'FINISH' and existing_end is not None:
+                should_reuse = False
+                self.console.print(f"  [dim]DEBUG: Not reusing job {existing_id} - already FINISH[/]")
+
+            if should_reuse:
+                manager.current_job_id = existing_id
+
+                # If it was incorrectly ended (not FINISH), reopen it
+                if existing_end is not None and existing_status != 'FINISH':
+                    self.console.print(f"  [cyan]Job REOPENED:[/] {gcode_file} (ID: {manager.current_job_id}, was {existing_status})")
+                    self.db_manager.execute_query(
+                        """
+                        UPDATE printer_job_history
+                        SET status = %s, end_time = NULL
+                        WHERE id = %s;
+                        """,
+                        (status, manager.current_job_id)
+                    )
+                elif existing_end is None:
+                    self.console.print(f"  [yellow]Job RESUMED:[/] {gcode_file} (ID: {manager.current_job_id})")
                     self.db_manager.execute_query(
                         """
                         UPDATE printer_job_history
@@ -1544,79 +1615,6 @@ class SafePrinterMonitor:
                     self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
 
                 return
-
-        # For local prints without bambu_job_id, also check for recently ended jobs that might be the same print
-        # This handles reconnect scenarios where the job was incorrectly marked as ended
-        if not bambu_job_id:
-            # Calculate expected start time based on current progress
-            expected_start_time = datetime.datetime.now()
-            if isinstance(remaining_time_min, (int, float)) and remaining_time_min >= 0:
-                if isinstance(percentage, (int, float)) and 0 < percentage < 100:
-                    try:
-                        remaining_seconds = int(remaining_time_min * 60)
-                        elapsed_seconds = int((float(percentage) * float(remaining_seconds)) / (100.0 - float(percentage)))
-                        expected_start_time = datetime.datetime.now() - datetime.timedelta(seconds=elapsed_seconds)
-                    except Exception:
-                        pass
-
-            # Look for a recent job with same filename that started around the expected time (within 10 minutes)
-            recent_job = self.db_manager.execute_query(
-                """
-                SELECT id, bambu_job_id, start_time, end_time, status FROM printer_job_history
-                WHERE printer_id = %s
-                  AND filename = %s
-                  AND start_time > %s - INTERVAL '10 minutes'
-                  AND start_time < %s + INTERVAL '10 minutes'
-                ORDER BY start_time DESC
-                LIMIT 1;
-                """,
-                (manager.printer_id, gcode_file, expected_start_time, expected_start_time),
-                fetch=True
-            )
-
-            if recent_job and len(recent_job) > 0:
-                existing_id, existing_bambu_job_id, existing_start, existing_end, existing_status = recent_job[0]
-
-                # Don't reuse if it has a different bambu_job_id
-                if not (existing_bambu_job_id and bambu_job_id and existing_bambu_job_id != bambu_job_id):
-                    manager.current_job_id = existing_id
-
-                    # If it was incorrectly ended, reopen it
-                    if existing_end is not None:
-                        self.console.print(f"  [cyan]Job REOPENED (local):[/] {gcode_file} (ID: {manager.current_job_id}, was {existing_status})")
-                        self.db_manager.execute_query(
-                            """
-                            UPDATE printer_job_history
-                            SET status = %s, end_time = NULL
-                            WHERE id = %s;
-                            """,
-                            (status, manager.current_job_id)
-                        )
-                    else:
-                        self.console.print(f"  [yellow]Job RESUMED (local, by time match):[/] {gcode_file} (ID: {manager.current_job_id})")
-                        self.db_manager.execute_query(
-                            """
-                            UPDATE printer_job_history
-                            SET status = %s
-                            WHERE id = %s;
-                            """,
-                            (status, manager.current_job_id)
-                        )
-
-                    # Backfill filaments if needed
-                    filament_count = self.db_manager.execute_query(
-                        """
-                        SELECT COUNT(*) FROM printer_job_filaments
-                        WHERE job_history_id = %s;
-                        """,
-                        (manager.current_job_id,),
-                        fetch=True
-                    )
-
-                    if filament_count and filament_count[0][0] == 0:
-                        self._log_job_filaments(manager.current_job_id, manager.printer_id, status_data)
-
-                    return
 
         # New job - calculate estimated start time based on progress
         interval_string = None
